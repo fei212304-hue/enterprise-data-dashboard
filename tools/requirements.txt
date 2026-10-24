@@ -1,0 +1,6 @@
+# 通用数据看板生成器 · 依赖清单
+# 安装：pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+pandas>=1.5
+numpy>=1.23
+plotly>=5.10
+openpyxl>=3.0
