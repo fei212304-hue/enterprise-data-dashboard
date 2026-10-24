@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>企业数据样本 · 描述统计与数据清洗</title>
+<style>
+  :root{
+    --bg:#f5f7fa; --card:#ffffff; --ink:#1f2937; --sub:#6b7280;
+    --line:#e5e7eb; --brand:#2563eb; --brand-soft:#eff6ff;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:880px; margin:0 auto; padding:56px 24px 72px;}
+  header h1{font-size:26px; font-weight:700; margin:0 0 10px; letter-spacing:-.3px;}
+  header .sub{color:var(--sub); font-size:14px; line-height:1.8; margin:0;}
+  .tag{
+    display:inline-block; margin-bottom:18px; padding:5px 12px; border-radius:999px;
+    background:var(--brand-soft); color:var(--brand); font-size:12px; font-weight:600;
+    letter-spacing:.3px;
+  }
+  .grid{display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:32px;}
+  @media (max-width:680px){ .grid{grid-template-columns:1fr;} }
+  a.card{
+    display:block; padding:24px; background:var(--card); border:1px solid var(--line);
+    border-radius:14px; text-decoration:none; color:inherit;
+    transition:transform .15s ease, box-shadow .15s ease, border-color .15s ease;
+  }
+  a.card:hover{transform:translateY(-2px); box-shadow:0 10px 28px rgba(17,24,39,.08); border-color:#c7d2fe;}
+  .card .no{font-size:12px; font-weight:700; color:var(--brand); letter-spacing:.8px;}
+  .card h2{font-size:17px; margin:8px 0 8px; font-weight:650;}
+  .card p{margin:0; font-size:13px; color:var(--sub); line-height:1.75;}
+  .card .go{margin-top:16px; font-size:13px; font-weight:600; color:var(--brand);}
+  .meta{
+    margin-top:28px; padding:18px 20px; background:var(--card); border:1px solid var(--line);
+    border-radius:12px; font-size:13px; color:var(--sub); line-height:1.9;
+  }
+  .meta b{color:var(--ink); font-weight:600;}
+  .meta ul{margin:8px 0 0; padding-left:20px;}
+  footer{margin-top:36px; font-size:12px; color:#9ca3af; line-height:1.9;}
+  footer a{color:#9ca3af;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="tag">大数据统计 · 第 3 章 描述统计与清洗</span>
+    <h1>企业数据样本 · 描述统计与数据清洗</h1>
+    <p class="sub">
+      1010 家企业 × 17 个字段的课堂练习样本，完成缺失值填补、异常值修正与描述统计分析。
+    </p>
+  </header>
+
+  <div class="grid">
+    <a class="card" href="./企业数据样本_可视化看板.html">
+      <div class="no">01 / DASHBOARD</div>
+      <h2>交互式可视化看板</h2>
+      <p>15 张图表，支持按行业、地区、企业性质、产品质量等级筛选，每张图可一键导出 PNG。</p>
+      <div class="go">打开看板 →</div>
+    </a>
+    <a class="card" href="./企业数据样本_分析报告.html">
+      <div class="no">02 / REPORT</div>
+      <h2>数据清洗分析报告</h2>
+      <p>缺失值、重复值、异常值的识别与处理全过程，含 8 张图表与清洗步骤说明。</p>
+      <div class="go">查看报告 →</div>
+    </a>
+  </div>
+
+  <div class="meta">
+    <b>数据概况</b>
+    <ul>
+      <li>样本量 1010 家 · 字段 17 个（12 个数值 + 4 个分类 + 1 个主键）</li>
+      <li>缺失值 987 个（5.7%）以行业分组中位数填补；异常值 120 个已修正</li>
+      <li>完全重复行 0 条（17 列全等 / 企业ID / 去 ID 三种口径均无重复）</li>
+    </ul>
+  </div>
+
+  <footer>
+    数据来源：课程《大数据统计》第 3 章课堂练习发放的教学样本（模拟数据，专供清洗方法练习）。<br>
+    分析结论仅用于演示统计方法，不构成真实商业洞察。
+    详见 <a href="./README.md">README</a>。
+  </footer>
+</div>
+</body>
+</html>
