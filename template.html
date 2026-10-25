@@ -249,8 +249,8 @@ fileInput.addEventListener('change',()=>{ if(fileInput.files[0]) handleFile(file
 
 function handleFile(file){
   clearStatus();
-  if(typeof XLSX==='undefined'){ showStatus('表格解析库未加载，请确认 libs 文件夹与本文件在一起，或联网后重试。',true); return; }
-  if(typeof Plotly==='undefined'){ showStatus('图表库未加载，请确认 libs 文件夹与本文件在一起，或联网后重试。',true); return; }
+  if(typeof XLSX==='undefined'){ showStatus('表格解析库没能加载。请用 Chrome / Edge 打开本文件；如果还不行，重新下载一次这个 HTML（文件可能在下载中被截断）。',true); return; }
+  if(typeof Plotly==='undefined'){ showStatus('图表库没能加载。请用 Chrome / Edge 打开本文件；如果还不行，重新下载一次这个 HTML。',true); return; }
   const reader=new FileReader();
   reader.onload=e=>{
     try{
@@ -440,6 +440,15 @@ function downloadCSV(){
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'清洗后数据');
   XLSX.writeFile(wb,'清洗后数据.csv');
 }
+// ---------- 启动自检：把两个库的加载状态写到 <html data-libs>，方便排查 ----------
+(function selfCheck(){
+  const xv = (typeof XLSX!=='undefined') ? (XLSX.version||'ok') : 'missing';
+  const pv = (typeof Plotly!=='undefined') ? (Plotly.version||'ok') : 'missing';
+  document.documentElement.setAttribute('data-libs','xlsx='+xv+';plotly='+pv);
+  if(xv==='missing'||pv==='missing'){
+    showStatus('本文件的图表/解析库没能加载（xlsx='+xv+', plotly='+pv+'）。请用 Chrome 或 Edge 打开，或重新下载本文件。',true);
+  }
+})();
 </script>
 </body>
 </html>
