@@ -355,13 +355,20 @@ function generate(){
   const q1=quantile(mv,0.25), q3=quantile(mv,0.75), iqr=q3-q1;
   const lo=q1-1.5*iqr, hi=q3+1.5*iqr;
   const before=rows.length;
-  rows=rows.filter(r=>{ const v=toNumber(r[main]); return v>=lo && v<=hi; });
+  let nLow=0, nHigh=0;
+  rows=rows.filter(r=>{
+    const v=toNumber(r[main]);
+    if(!Number.isFinite(v)) return false;
+    if(v<lo){ nLow++; return false; }
+    if(v>hi){ nHigh++; return false; }
+    return true;
+  });
   const outliers=before-rows.length;
   if(!rows.length){ showStatus('清洗并筛选后没有数据，请调整筛选条件。',true); return; }
   state.filtered=rows; state.main=main;
   state.catForGroup = state.cats.find(c=>c!==main) || null;
   state.catForDist  = state.cats[0] || null;
-  renderCleanReport(outliers, lo, hi);
+  renderCleanReport(outliers, lo, hi, nLow, nHigh);
   renderDashboard(rows,main,{outliers:outliers, lo:lo, hi:hi});
   $('dashboard').style.display='';
   $('dashboard').scrollIntoView({behavior:'smooth'});
@@ -518,21 +525,37 @@ function autoBins(vals){
 
 
 // 清洗报告：展示自动清洗做了什么（去重 / 填补 / 剔异常值）
-function renderCleanReport(outliers, lo, hi){
+function renderCleanReport(outliers, lo, hi, nLow, nHigh){
   const rep=state.cleanReport||{};
   const imp=rep.imputed||{};
   const impKeys=Object.keys(imp);
   const impTotal=impKeys.reduce((s,c)=>s+imp[c],0);
-  const rows=[
-    `原始数据 <b>${rep.origRows||0}</b> 行，自动清洗后得到 <b>${state.filtered.length}</b> 行（分析即基于清洗后的数据）。`,
-    `① 删除完全重复的行：<b>${rep.dupRemoved||0}</b> 行`,
-    impKeys.length
-      ? `② 缺失值中位数填补：共 <b>${impTotal}</b> 个（${impKeys.map(c=>c+' '+imp[c]+'个').join('、')}）`
-      : `② 缺失值中位数填补：未检测到缺失值`,
-    `③ 主指标「${state.main}」异常值（IQR 1.5× 法，正常区间 ${fmt(lo)} ~ ${fmt(hi)}）自动剔除：<b>${outliers}</b> 行`
-  ];
+  // 剔除方向说明：让读者知道被剔的是"特别大"还是"特别小"的企业
+  const dirs=[];
+  if(nLow>0) dirs.push(`${nLow} 行明显偏小`);
+  if(nHigh>0) dirs.push(`${nHigh} 行明显偏大`);
+  const dirTxt = outliers>0 && dirs.length ? `（其中 ${dirs.join('、')}）` : '';
+  const rows=[];
+  rows.push(`原始数据 <b>${rep.origRows||0}</b> 行，自动清洗后得到 <b>${state.filtered.length}</b> 行（分析即基于清洗后的数据）。`);
+  rows.push(`① 删除完全重复的行：<b>${rep.dupRemoved||0}</b> 行`);
+  rows.push(impKeys.length
+    ? `② 缺失值中位数填补：共 <b>${impTotal}</b> 个（${impKeys.map(c=>c+' '+imp[c]+'个').join('、')}）`
+    : `② 缺失值中位数填补：未检测到缺失值`);
+  rows.push(`③ 主指标「${state.main}」异常值（IQR 1.5× 法，正常区间 ${fmtBound(lo)} ~ ${fmtBound(hi)}）自动剔除：<b>${outliers}</b> 行${dirTxt}`);
+  if(outliers>0){
+    rows.push(`<span style="color:#8a6d3b;">提示：IQR 法把「数值特别大或特别小」的个体判为异常，它们往往是真实存在的大型/微型企业而非录入错误，剔除后结果代表的是「主体企业」的普遍规律。</span>`);
+  }
   $('cleanBody').innerHTML=rows.map(r=>`<div style="margin:5px 0;">${r}</div>`).join('');
   $('cleanCard').style.display='';
+}
+
+// 区间端点格式化：千分位 + 合理小数位，避免出现 -8991.38 / 29,518.102 这种混搭
+function fmtBound(v){
+  if(!Number.isFinite(v)) return '—';
+  const a=Math.abs(v);
+  if(a>=1000) return Math.round(v).toLocaleString('zh-CN');
+  if(a>=10) return String(Math.round(v*10)/10);
+  return String(Math.round(v*100)/100);
 }
 
 function renderPreview(rows){
