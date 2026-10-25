@@ -35,6 +35,10 @@
   .card h2{font-size:17px; margin:8px 0 8px; font-weight:650;}
   .card p{margin:0; font-size:13px; color:var(--sub); line-height:1.75;}
   .card .go{margin-top:16px; font-size:13px; font-weight:600; color:var(--brand);}
+  .card.wide{grid-column:1 / -1; border-color:#2563eb; background:linear-gradient(120deg,#eff6ff,#f0fdf4);}
+  .card.wide .no{color:#16a34a;}
+  .card.wide h2{font-size:18px;}
+  .card.wide .go{color:#16a34a;}
   .meta{
     margin-top:28px; padding:18px 20px; background:var(--card); border:1px solid var(--line);
     border-radius:12px; font-size:13px; color:var(--sub); line-height:1.9;
@@ -56,6 +60,12 @@
   </header>
 
   <div class="grid">
+    <a class="card wide" href="./dashboard-web.html">
+      <div class="no">★ 新手推荐 / NO-INSTALL</div>
+      <h2>免安装网页版看板生成器（双击即用）</h2>
+      <p>不用装 Python、不用开命令行、可离线。打开后上传任意 Excel / CSV，自动识别字段并生成可视化看板，每张图可导出 PNG。</p>
+      <div class="go">立即使用 →</div>
+    </a>
     <a class="card" href="./企业数据样本_可视化看板.html">
       <div class="no">01 / DASHBOARD</div>
       <h2>交互式可视化看板</h2>
