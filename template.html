@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Excel 数据看板生成器 · 免安装网页版</title>
+<style>
+  :root{
+    --bg:#f5f7fa; --card:#ffffff; --line:#e6e9ef; --text:#1f2733;
+    --sub:#6b7686; --brand:#2f6fed; --brand2:#22a06b; --warn:#e8633a;
+    --shadow:0 2px 10px rgba(31,39,51,.06);
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:"Microsoft YaHei","PingFang SC","Hiragino Sans GB",system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    line-height:1.6;
+  }
+  header{
+    background:linear-gradient(120deg,#2f6fed,#22a06b);
+    color:#fff; padding:22px 28px;
+  }
+  header h1{margin:0;font-size:22px;font-weight:700;}
+  header p{margin:6px 0 0;opacity:.92;font-size:13px;}
+  .wrap{max-width:1180px;margin:0 auto;padding:24px 20px 60px;}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:20px;margin-bottom:18px;}
+  .upload{
+    border:2px dashed #c4ccd8;border-radius:14px;padding:40px 20px;text-align:center;
+    background:#fbfcfe;cursor:pointer;transition:.2s;
+  }
+  .upload:hover{border-color:var(--brand);background:#f3f7ff;}
+  .upload b{color:var(--brand);font-size:16px;}
+  .upload small{display:block;color:var(--sub);margin-top:8px;}
+  #fileInput{display:none;}
+  .row{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;}
+  .field{display:flex;flex-direction:column;gap:6px;}
+  .field label{font-size:13px;color:var(--sub);font-weight:600;}
+  select,button{font-family:inherit;font-size:14px;}
+  select{padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--text);min-width:160px;}
+  button{
+    padding:10px 18px;border:none;border-radius:9px;background:var(--brand);color:#fff;
+    cursor:pointer;font-weight:600;transition:.15s;
+  }
+  button:hover{filter:brightness(1.05);}
+  button.ghost{background:#eef2fb;color:var(--brand);}
+  button.green{background:var(--brand2);}
+  .filters{display:flex;flex-wrap:wrap;gap:14px;margin-top:14px;}
+  .fitem{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#fbfcfe;}
+  .fitem .top{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;}
+  .fitem select{margin-top:8px;min-width:150px;}
+  #status{font-size:13px;margin:10px 0;padding:10px 14px;border-radius:8px;display:none;}
+  #status.ok{display:block;background:#eafaf1;color:#1c7a4d;border:1px solid #cdeed8;}
+  #status.err{display:block;background:#fdecea;color:#b42318;border:1px solid #f6c9c2;}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px;margin-bottom:20px;}
+  .kpi{background:linear-gradient(135deg,#f3f7ff,#eefcf4);border:1px solid var(--line);border-radius:12px;padding:16px;}
+  .kpi .v{font-size:26px;font-weight:800;color:var(--brand);}
+  .kpi .l{font-size:13px;color:var(--sub);margin-top:4px;}
+  .chart-card{margin-bottom:18px;}
+  .chart-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;}
+  .chart-head h3{margin:0;font-size:16px;}
+  .chart-box{width:100%;height:420px;}
+  details{margin-top:10px;}
+  details summary{cursor:pointer;color:var(--brand);font-size:13px;}
+  table{border-collapse:collapse;width:100%;font-size:12px;}
+  th,td{border:1px solid var(--line);padding:6px 8px;text-align:left;}
+  th{background:#f0f3f9;}
+  .hint{font-size:12px;color:var(--sub);margin-top:6px;}
+  .foot{text-align:center;color:var(--sub);font-size:12px;margin-top:30px;}
+</style>
+</head>
+<body>
+<header>
+  <h1>Excel 数据看板生成器 · 免安装网页版</h1>
+  <p>上传 Excel / CSV → 自动识别字段 → 在线生成可视化看板。无需 Python、无需命令行、可离线使用。</p>
+</header>
+
+<div class="wrap">
+
+  <div class="card">
+    <div class="upload" id="uploadArea">
+      <b>点击选择，或把文件拖到这里</b>
+      <small>支持 .xlsx / .xls / .csv 　单次建议不超过 5 万行</small>
+    </div>
+    <input type="file" id="fileInput" accept=".xlsx,.xls,.csv">
+  </div>
+
+  <div class="card" id="configCard" style="display:none;">
+    <div class="row">
+      <div class="field" id="sheetField" style="display:none;">
+        <label>工作表</label>
+        <select id="sheetSel"></select>
+      </div>
+      <div class="field">
+        <label>主指标（要分析的核心数值）</label>
+        <select id="mainSel"></select>
+      </div>
+      <div class="field">
+        <button id="genBtn">生成看板</button>
+      </div>
+      <div class="field">
+        <button class="green" id="csvBtn">下载清洗后数据 (CSV)</button>
+      </div>
+    </div>
+    <div class="filters" id="filterArea"></div>
+    <div class="hint">勾选分类字段并选择取值，可筛选数据后再生成看板（不选 = 全部）。</div>
+  </div>
+
+  <div id="status"></div>
+
+  <div id="dashboard" style="display:none;">
+    <div class="kpis" id="kpis"></div>
+    <div class="card chart-card">
+      <div class="chart-head"><h3 id="t1">主指标分布</h3><button class="ghost" data-save="c1">保存图片</button></div>
+      <div id="c1" class="chart-box"></div>
+    </div>
+    <div class="card chart-card">
+      <div class="chart-head"><h3 id="t2">主指标按分类均值</h3><button class="ghost" data-save="c2">保存图片</button></div>
+      <div id="c2" class="chart-box"></div>
+    </div>
+    <div class="card chart-card">
+      <div class="chart-head"><h3>数值字段相关系数</h3><button class="ghost" data-save="c3">保存图片</button></div>
+      <div id="c3" class="chart-box"></div>
+    </div>
+    <div class="card chart-card">
+      <div class="chart-head"><h3 id="t4">分类字段取值分布</h3><button class="ghost" data-save="c4">保存图片</button></div>
+      <div id="c4" class="chart-box"></div>
+    </div>
+    <div class="card chart-card">
+      <div class="chart-head"><h3 id="t5">主指标箱线图（看异常值）</h3><button class="ghost" data-save="c5">保存图片</button></div>
+      <div id="c5" class="chart-box"></div>
+    </div>
+    <details>
+      <summary>展开数据预览（前 50 行）</summary>
+      <div style="overflow:auto;max-height:400px;margin-top:10px;">
+        <table id="previewTbl"></table>
+      </div>
+    </details>
+  </div>
+
+  <div class="foot">本工具在浏览器本地运行，数据不会上传到任何服务器，请放心使用。</div>
+</div>
+
+<!--XLSX_LIB-->
+<!--PLOTLY_LIB-->
+<script>
+"use strict";
+
+const state = {
+  wb:null, sheets:[], sheet:null, raw:[], headers:[],
+  numeric:[], cats:[], idcols:[], other:[],
+  filtered:[], main:null, catForGroup:null, catForDist:null
+};
+
+const $ = id => document.getElementById(id);
+const statusEl = $('status');
+function showStatus(msg, isErr){
+  statusEl.textContent = msg;
+  statusEl.className = isErr ? 'err' : 'ok';
+}
+function clearStatus(){ statusEl.className=''; statusEl.textContent=''; }
+
+// ---------- 工具函数 ----------
+function toNumber(v){
+  if(v===null||v===undefined||v==='') return NaN;
+  if(typeof v==='number') return v;
+  const s=String(v).replace(/,/g,'').replace(/%/g,'').trim();
+  const n=Number(s);
+  return Number.isFinite(n)?n:NaN;
+}
+function isIdColumn(header, values, nRows){
+  const kw=['id','编号','序号','单号','订单号','代码','学号','工号','编码','账户'];
+  const low=String(header).toLowerCase();
+  for(const k of kw){ if(low.includes(k)) return true; }
+  // 仅"整数 + 近连续（像序号 1,2,3…）"才当编号；普通测量列即使唯一也不算
+  const ints=[]; let allInt=true;
+  for(const v of values){
+    if(v===null||v===undefined||v==='') continue;
+    const n=Number(v);
+    if(!Number.isFinite(n)||!Number.isInteger(n)){ allInt=false; break; }
+    ints.push(n);
+  }
+  if(!allInt) return false;
+  const uniq=new Set(ints);
+  if(uniq.size < nRows*0.9) return false;        // 不够唯一 → 不是编号
+  const arr=[...uniq].sort((a,b)=>a-b);
+  const span=arr[arr.length-1]-arr[0]+1;          // 取值跨度
+  return span <= uniq.size*2;                     // 近连续（允许少量缺号）才算编号
+}
+function classify(rows){
+  const headers=Object.keys(rows[0]||{});
+  const n=rows.length;
+  const numeric=[],cats=[],idcols=[],other=[];
+  for(const h of headers){
+    const vals=rows.map(r=>r[h]);
+    if(isIdColumn(h,vals,n)){ idcols.push(h); continue; }
+    let num=0,nonNull=0;
+    for(const v of vals){
+      if(v===null||v===undefined||v==='') continue;
+      nonNull++;
+      if(Number.isFinite(toNumber(v))) num++;
+    }
+    if(nonNull>0 && num/nonNull>=0.8) numeric.push(h);
+    else if(nonNull>0) cats.push(h);
+    else other.push(h);
+  }
+  cats.sort((a,b)=> new Set(rows.map(r=>r[a])).size - new Set(rows.map(r=>r[b])).size);
+  return {headers,numeric,cats,idcols,other};
+}
+function median(arr){
+  const a=arr.filter(Number.isFinite).slice().sort((x,y)=>x-y);
+  if(!a.length) return NaN;
+  const m=Math.floor(a.length/2);
+  return a.length%2? a[m] : (a[m-1]+a[m])/2;
+}
+function pearson(x,y){
+  let n=0,sx=0,sy=0,sxy=0,sx2=0,sy2=0;
+  for(let i=0;i<x.length;i++){
+    const a=x[i],b=y[i];
+    if(!Number.isFinite(a)||!Number.isFinite(b)) continue;
+    n++; sx+=a; sy+=b; sxy+=a*b; sx2+=a*a; sy2+=b*b;
+  }
+  const d=(n*sx2-sx*sx)*(n*sy2-sy*sy);
+  return d<=0?0:(n*sxy-sx*sy)/Math.sqrt(d);
+}
+function uniqueVals(rows,col,max){
+  const s=new Set();
+  for(const r of rows){ const v=r[col]; if(v!==null&&v!==undefined&&v!=='') s.add(v); if(s.size>max) break; }
+  return [...s];
+}
+function pickMain(numeric){
+  const prefer=['营业额','销售额','金额','收入','利润','销量','销售','price','amount','sales','revenue','profit','qty','数量'];
+  for(const p of prefer){
+    const hit=numeric.find(c=>String(c).toLowerCase().includes(p));
+    if(hit) return hit;
+  }
+  return numeric[0]||null;
+}
+
+// ---------- 读取文件 ----------
+const uploadArea=$('uploadArea'), fileInput=$('fileInput');
+uploadArea.addEventListener('click',()=>fileInput.click());
+uploadArea.addEventListener('dragover',e=>{e.preventDefault();uploadArea.style.borderColor='#2f6fed';});
+uploadArea.addEventListener('dragleave',()=>{uploadArea.style.borderColor='#c4ccd8';});
+uploadArea.addEventListener('drop',e=>{
+  e.preventDefault(); uploadArea.style.borderColor='#c4ccd8';
+  if(e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change',()=>{ if(fileInput.files[0]) handleFile(fileInput.files[0]); });
+
+function handleFile(file){
+  clearStatus();
+  if(typeof XLSX==='undefined'){ showStatus('表格解析库未加载，请确认 libs 文件夹与本文件在一起，或联网后重试。',true); return; }
+  if(typeof Plotly==='undefined'){ showStatus('图表库未加载，请确认 libs 文件夹与本文件在一起，或联网后重试。',true); return; }
+  const reader=new FileReader();
+  reader.onload=e=>{
+    try{
+      const data=new Uint8Array(e.target.result);
+      const wb=XLSX.read(data,{type:'array'});
+      state.wb=wb; state.sheets=wb.SheetNames;
+      if(wb.SheetNames.length>1){
+        $('sheetField').style.display='';
+        const sel=$('sheetSel'); sel.innerHTML='';
+        wb.SheetNames.forEach(s=>{ const o=document.createElement('option'); o.value=s; o.textContent=s; sel.appendChild(o); });
+        sel.onchange=()=>loadSheet(sel.value);
+      } else { $('sheetField').style.display='none'; }
+      loadSheet(wb.SheetNames[0]);
+      $('configCard').style.display='';
+    }catch(err){ showStatus('读取文件失败：'+err.message,true); }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function loadSheet(name){
+  const ws=state.wb.Sheets[name];
+  const rows=XLSX.utils.sheet_to_json(ws,{defval:null});
+  state.sheet=name; state.raw=rows;
+  const c=classify(rows);
+  Object.assign(state,c);
+  // 主指标
+  const mainSel=$('mainSel'); mainSel.innerHTML='';
+  if(!c.numeric.length){ showStatus('未检测到数值字段，无法生成看板。请确认表格含数字列。',true); return; }
+  c.numeric.forEach(col=>{ const o=document.createElement('option'); o.value=col; o.textContent=col; mainSel.appendChild(o); });
+  mainSel.value=pickMain(c.numeric);
+  // 筛选维度
+  const fa=$('filterArea'); fa.innerHTML='';
+  c.cats.forEach(col=>{
+    const uvs=uniqueVals(rows,col,30);
+    if(uvs.length<2||uvs.length>30) return;
+    const box=document.createElement('div'); box.className='fitem';
+    box.innerHTML=`<div class="top"><input type="checkbox" class="fchk" value="${col}"><span>${col}</span></div>`;
+    const sel=document.createElement('select'); sel.id='fv_'+col;
+    const all=document.createElement('option'); all.value='__all__'; all.textContent='全部'; sel.appendChild(all);
+    uvs.slice().sort((a,b)=>String(a).localeCompare(String(b))).forEach(v=>{ const o=document.createElement('option'); o.value=v; o.textContent=v; sel.appendChild(o); });
+    sel.style.display='none';
+    box.querySelector('.fchk').addEventListener('change',ev=>{ sel.style.display=ev.target.checked?'block':'none'; });
+    box.appendChild(sel); fa.appendChild(box);
+  });
+  if(!fa.children.length) fa.innerHTML='<span class="hint">没有适合筛选的分类字段（取值需 2~30 个）。</span>';
+  showStatus(`已读取工作表「${name}」：${rows.length} 行 × ${c.headers.length} 列，识别到 ${c.numeric.length} 个数值字段、${c.cats.length} 个分类字段。`,false);
+}
+
+// ---------- 生成看板 ----------
+$('genBtn').addEventListener('click',generate);
+$('csvBtn').addEventListener('click',downloadCSV);
+
+function currentFilters(){
+  const out=[];
+  document.querySelectorAll('.fchk:checked').forEach(chk=>{
+    const col=chk.value; const val=$('fv_'+col).value;
+    if(val!=='__all__') out.push([col,val]);
+  });
+  return out;
+}
+function applyFilters(rows,filters){
+  if(!filters.length) return rows.slice();
+  return rows.filter(r=>filters.every(([c,v])=> String(r[c])===String(v)));
+}
+function generate(){
+  const main=$('mainSel').value;
+  const filters=currentFilters();
+  const rows=applyFilters(state.raw,filters);
+  if(!rows.length){ showStatus('筛选后没有数据，请调整筛选条件。',true); return; }
+  state.filtered=rows; state.main=main;
+  state.catForGroup = state.cats.find(c=>c!==main) || null;
+  state.catForDist  = state.cats[0] || null;
+  renderDashboard(rows,main);
+  $('dashboard').style.display='';
+  $('dashboard').scrollIntoView({behavior:'smooth'});
+  showStatus(`看板已生成（筛选后 ${rows.length} 行）。点击每张图右上角或“保存图片”按钮可导出 PNG。`,false);
+}
+
+function renderDashboard(rows,main){
+  // KPI
+  let missing=0, numericCells=0;
+  for(const r of rows) for(const c of state.numeric){ const v=toNumber(r[c]); if(Number.isFinite(v)) numericCells++; else if(r[c]!==null&&r[c]!==undefined&&r[c]!=='') missing++; }
+  // 异常值(IQR) 主指标
+  const mv=rows.map(r=>toNumber(r[main])).filter(Number.isFinite);
+  const med=median(mv), q1=quantile(mv,0.25), q3=quantile(mv,0.75), iqr=q3-q1;
+  const lo=q1-1.5*iqr, hi=q3+1.5*iqr;
+  const outliers=mv.filter(v=>v<lo||v>hi).length;
+  const kpis=[
+    {v:rows.length,l:'数据行数'},
+    {v:state.headers.length,l:'字段数'},
+    {v:state.numeric.length,l:'数值字段'},
+    {v:missing,l:'缺失数值格'},
+    {v:outliers,l:`「${main}」异常值`}
+  ];
+  $('kpis').innerHTML=kpis.map(k=>`<div class="kpi"><div class="v">${fmt(k.v)}</div><div class="l">${k.l}</div></div>`).join('');
+
+  // 图1 直方图
+  const histVals=mv;
+  Plotly.newPlot('c1',[{x:histVals,type:'histogram',marker:{color:'#2f6fed'}}],
+    {title:'',xaxis:{title:main},yaxis:{title:'频数'},margin:{t:20},paper_bgcolor:'#fff',plot_bgcolor:'#fff'},
+    {responsive:true,displaylogo:false});
+
+  // 图2 按分类均值
+  if(state.catForGroup){
+    $('t2').textContent=`「${main}」按「${state.catForGroup}」均值`;
+    const groups={};
+    rows.forEach(r=>{ const g=r[state.catForGroup]; if(g===null||g===undefined||g==='') return; (groups[g]=groups[g]||[]).push(toNumber(r[main])); });
+    const labels=Object.keys(groups).sort((a,b)=>String(a).localeCompare(String(b)));
+    const means=labels.map(l=>{ const a=groups[l].filter(Number.isFinite); return a.length? a.reduce((s,x)=>s+x,0)/a.length : null; });
+    Plotly.newPlot('c2',[{x:labels,y:means,type:'bar',marker:{color:'#22a06b'}}],
+      {title:'',xaxis:{title:state.catForGroup},yaxis:{title:main+' 均值'},margin:{t:20},paper_bgcolor:'#fff',plot_bgcolor:'#fff'},
+      {responsive:true,displaylogo:false});
+  } else { $('t2').textContent='主指标按分类均值（无分类字段）'; Plotly.newPlot('c2',[],{title:'无可用分类字段',margin:{t:20}},{responsive:true,displaylogo:false}); }
+
+  // 图3 相关系数热力图
+  const nums=state.numeric;
+  if(nums.length>=2){
+    const mat=[];
+    for(const a of nums){ const row=[]; for(const b of nums){ row.push(pearson(rows.map(r=>toNumber(r[a])),rows.map(r=>toNumber(r[b])))); } mat.push(row); }
+    Plotly.newPlot('c3',[{z:mat,x:nums,y:nums,type:'heatmap',colorscale:'RdBu',zmid:0,
+      text:mat.map(r=>r.map(v=>v.toFixed(2))),texttemplate:'%{text}',textfont:{size:10}}],
+      {title:'',margin:{t:20},paper_bgcolor:'#fff',plot_bgcolor:'#fff',height:Math.max(360,nums.length*42)},
+      {responsive:true,displaylogo:false});
+  } else { Plotly.newPlot('c3',[],{title:'数值字段不足，无法计算相关性',margin:{t:20}},{responsive:true,displaylogo:false}); }
+
+  // 图4 分类取值分布
+  if(state.catForDist){
+    $('t4').textContent=`「${state.catForDist}」取值分布`;
+    const cnt={};
+    rows.forEach(r=>{ const v=r[state.catForDist]; if(v===null||v===undefined||v==='') return; cnt[v]=(cnt[v]||0)+1; });
+    let labels=Object.keys(cnt).sort((a,b)=>cnt[b]-cnt[a]);
+    const top=labels.slice(0,12); const others=labels.slice(12).reduce((s,l)=>s+cnt[l],0);
+    const vals=top.map(l=>cnt[l]); if(others>0){ top.push('其他'); vals.push(others); }
+    const isPie = top.length<=8;
+    const trace = isPie
+      ? {labels:top,values:vals,type:'pie',textinfo:'label+percent',hole:.35}
+      : {x:top,y:vals,type:'bar',marker:{color:'#7c5cff'}};
+    Plotly.newPlot('c4',[trace],
+      {title:'',margin:{t:20},paper_bgcolor:'#fff',plot_bgcolor:'#fff'},
+      {responsive:true,displaylogo:false});
+  } else { $('t4').textContent='分类字段取值分布（无分类字段）'; Plotly.newPlot('c4',[],{title:'无可用分类字段',margin:{t:20}},{responsive:true,displaylogo:false}); }
+
+  // 图5 箱线图
+  if(state.catForGroup){
+    $('t5').textContent=`「${main}」按「${state.catForGroup}」箱线图`;
+    const groups={};
+    rows.forEach(r=>{ const g=r[state.catForGroup]; if(g===null||g===undefined||g==='') return; (groups[g]=groups[g]||[]).push(toNumber(r[main])); });
+    const labels=Object.keys(groups).sort((a,b)=>String(a).localeCompare(String(b))).slice(0,15);
+    const traces=labels.map(l=>({y:groups[l].filter(Number.isFinite),type:'box',name:String(l),boxpoints:'outliers'}));
+    Plotly.newPlot('c5',traces,
+      {title:'',yaxis:{title:main},showlegend:false,margin:{t:20},paper_bgcolor:'#fff',plot_bgcolor:'#fff'},
+      {responsive:true,displaylogo:false});
+  } else { $('t5').textContent='主指标箱线图（无分类字段）'; Plotly.newPlot('c5',[{y:mv,type:'box',boxpoints:'outliers',name:main}],{title:'',yaxis:{title:main},margin:{t:20},paper_bgcolor:'#fff',plot_bgcolor:'#fff'},{responsive:true,displaylogo:false}); }
+
+  renderPreview(rows);
+}
+
+function quantile(sortedArr,q){
+  const a=sortedArr.slice().sort((x,y)=>x-y);
+  if(!a.length) return NaN;
+  const pos=(a.length-1)*q, base=Math.floor(pos), rest=pos-base;
+  return a[base+1]!==undefined ? a[base]+rest*(a[base+1]-a[base]) : a[base];
+}
+function fmt(v){ if(typeof v==='number'){ return Math.abs(v)>=10000? v.toLocaleString('zh-CN') : (Number.isInteger(v)? v : v.toFixed(2)); } return v; }
+
+function renderPreview(rows){
+  const tbl=$('previewTbl');
+  const head=state.headers.slice(0,12);
+  let html='<thead><tr>'+head.map(h=>`<th>${h}</th>`).join('')+'</tr></thead><tbody>';
+  rows.slice(0,50).forEach(r=>{ html+='<tr>'+head.map(h=>`<td>${r[h]===null||r[h]===undefined?'':r[h]}</td>`).join('')+'</tr>'; });
+  html+='</tbody>'; tbl.innerHTML=html;
+}
+
+// ---------- 导出 ----------
+document.querySelectorAll('[data-save]').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    const id=btn.getAttribute('data-save');
+    Plotly.downloadImage(id,{format:'png',scale:2,filename:'看板_'+id});
+  });
+});
+function downloadCSV(){
+  const rows=state.filtered.length?state.filtered:state.raw;
+  // 中位数填补缺失数值，便于导出干净数据
+  const filled=rows.map(r=>({...r}));
+  state.numeric.forEach(c=>{ const m=median(rows.map(r=>toNumber(r[c]))); filled.forEach(r=>{ if(!Number.isFinite(toNumber(r[c]))) r[c]=m; }); });
+  const ws=XLSX.utils.json_to_sheet(filled);
+  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'清洗后数据');
+  XLSX.writeFile(wb,'清洗后数据.csv');
+}
+</script>
+</body>
+</html>
