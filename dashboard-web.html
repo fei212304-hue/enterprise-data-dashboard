@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta name="build-id" content="build-2026-10-25T15-36-30-223Z">
+<meta name="build-id" content="build-2026-10-25T15-58-58-878Z">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Excel 数据看板生成器 · 免安装网页版</title>
@@ -109,6 +109,10 @@
   <div id="status"></div>
 
   <div id="dashboard" style="display:none;">
+    <div class="card" id="cleanCard" style="display:none;border-left:4px solid var(--brand2);">
+      <h3 style="margin:0 0 10px;font-size:16px;">数据清洗报告（已自动完成，无需手动设置）</h3>
+      <div id="cleanBody"></div>
+    </div>
     <div class="kpis" id="kpis"></div>
     <div class="card chart-card">
       <div class="chart-head"><h3 id="t1">主指标分布</h3><button class="ghost" data-save="c1">保存图片</button></div>
@@ -188,6 +192,7 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
 const state = {
   wb:null, sheets:[], sheet:null, raw:[], headers:[],
   numeric:[], cats:[], idcols:[], other:[],
+  clean:null, cleanReport:null,
   filtered:[], main:null, catForGroup:null, catForDist:null
 };
 
@@ -276,6 +281,29 @@ function pickMain(numeric){
   return numeric[0]||null;
 }
 
+// ---------- 自动数据清洗（无需手动设置，按数据自动处理） ----------
+// 步骤：① 删除完全重复的行；② 数值列缺失值用该列中位数填补
+function cleanData(rows, numeric){
+  const report={ origRows:rows.length, dupRemoved:0, imputed:{}, cleanRows:0 };
+  // ① 去重：整行内容完全相同的视为重复，仅保留首次出现
+  const seen=new Set(); const dedup=[];
+  for(const r of rows){
+    const key=JSON.stringify(r);
+    if(seen.has(key)){ report.dupRemoved++; continue; }
+    seen.add(key); dedup.push(r);
+  }
+  // ② 缺失值填补：数值列用该列中位数填补空值（分类列保留原样）
+  const filled=dedup.map(r=>Object.assign({},r));
+  numeric.forEach(c=>{
+    const m=median(dedup.map(r=>toNumber(r[c])));
+    let cnt=0;
+    filled.forEach(r=>{ if(!Number.isFinite(toNumber(r[c]))){ r[c]=m; cnt++; } });
+    if(cnt>0) report.imputed[c]=cnt;
+  });
+  report.cleanRows=filled.length;
+  return { clean:filled, report };
+}
+
 // ---------- 读取文件 ----------
 const uploadArea=$('uploadArea'), fileInput=$('fileInput');
 uploadArea.addEventListener('click',()=>fileInput.click());
@@ -316,6 +344,9 @@ function loadSheet(name){
   state.sheet=name; state.raw=rows;
   const c=classify(rows);
   Object.assign(state,c);
+  // 自动清洗（去重 + 中位数填补），结果用于分析与导出
+  const cc=cleanData(rows, c.numeric);
+  state.clean=cc.clean; state.cleanReport=cc.report;
   // 主指标
   const mainSel=$('mainSel'); mainSel.innerHTML='';
   if(!c.numeric.length){ showStatus('未检测到数值字段，无法生成看板。请确认表格含数字列。',true); return; }
@@ -358,33 +389,38 @@ function applyFilters(rows,filters){
 function generate(){
   const main=$('mainSel').value;
   const filters=currentFilters();
-  const rows=applyFilters(state.raw,filters);
-  if(!rows.length){ showStatus('筛选后没有数据，请调整筛选条件。',true); return; }
+  let rows=applyFilters(state.clean,filters);
+  // 主指标异常值（IQR 1.5× 法则）自动剔除
+  const mv=rows.map(r=>toNumber(r[main]));
+  const q1=quantile(mv,0.25), q3=quantile(mv,0.75), iqr=q3-q1;
+  const lo=q1-1.5*iqr, hi=q3+1.5*iqr;
+  const before=rows.length;
+  rows=rows.filter(r=>{ const v=toNumber(r[main]); return v>=lo && v<=hi; });
+  const outliers=before-rows.length;
+  if(!rows.length){ showStatus('清洗并筛选后没有数据，请调整筛选条件。',true); return; }
   state.filtered=rows; state.main=main;
   state.catForGroup = state.cats.find(c=>c!==main) || null;
   state.catForDist  = state.cats[0] || null;
-  renderDashboard(rows,main);
+  renderCleanReport(outliers, lo, hi);
+  renderDashboard(rows,main,{outliers:outliers, lo:lo, hi:hi});
   $('dashboard').style.display='';
   $('dashboard').scrollIntoView({behavior:'smooth'});
-  showStatus(`看板已生成（筛选后 ${rows.length} 行）。点击每张图右上角或“保存图片”按钮可导出 PNG。`
+  showStatus(`看板已生成（清洗后 ${rows.length} 行）。点击每张图右上角或“保存图片”按钮可导出 PNG。`
     + (rows.length<20?`　⚠ 样本仅 ${rows.length} 行，第 1 张图已自动改成「点阵图」（一个点=一条数据）；数据超过 20 行才会显示直方图。`:''),false);
 }
 
-function renderDashboard(rows,main){
-  // KPI
-  let missing=0, numericCells=0;
-  for(const r of rows) for(const c of state.numeric){ const v=toNumber(r[c]); if(Number.isFinite(v)) numericCells++; else if(r[c]!==null&&r[c]!==undefined&&r[c]!=='') missing++; }
-  // 异常值(IQR) 主指标
+function renderDashboard(rows,main,stats){
+  stats=stats||{};
+  const rep=state.cleanReport||{};
+  // KPI（反映自动清洗结果）
   const mv=rows.map(r=>toNumber(r[main])).filter(Number.isFinite);
-  const med=median(mv), q1=quantile(mv,0.25), q3=quantile(mv,0.75), iqr=q3-q1;
-  const lo=q1-1.5*iqr, hi=q3+1.5*iqr;
-  const outliers=mv.filter(v=>v<lo||v>hi).length;
+  const med=median(mv);
   const kpis=[
-    {v:rows.length,l:'数据行数'},
+    {v:rows.length,l:'清洗后行数'},
     {v:state.headers.length,l:'字段数'},
     {v:state.numeric.length,l:'数值字段'},
-    {v:missing,l:'缺失数值格'},
-    {v:outliers,l:`「${main}」异常值`}
+    {v:rep.dupRemoved||0,l:'删除重复行'},
+    {v:stats.outliers||0,l:`「${main}」剔除异常值`}
   ];
   $('kpis').innerHTML=kpis.map(k=>`<div class="kpi"><div class="v">${fmt(k.v)}</div><div class="l">${k.l}</div></div>`).join('');
 
@@ -521,6 +557,24 @@ function autoBins(vals){
 }
 
 
+// 清洗报告：展示自动清洗做了什么（去重 / 填补 / 剔异常值）
+function renderCleanReport(outliers, lo, hi){
+  const rep=state.cleanReport||{};
+  const imp=rep.imputed||{};
+  const impKeys=Object.keys(imp);
+  const impTotal=impKeys.reduce((s,c)=>s+imp[c],0);
+  const rows=[
+    `原始数据 <b>${rep.origRows||0}</b> 行，自动清洗后得到 <b>${state.filtered.length}</b> 行（分析即基于清洗后的数据）。`,
+    `① 删除完全重复的行：<b>${rep.dupRemoved||0}</b> 行`,
+    impKeys.length
+      ? `② 缺失值中位数填补：共 <b>${impTotal}</b> 个（${impKeys.map(c=>c+' '+imp[c]+'个').join('、')}）`
+      : `② 缺失值中位数填补：未检测到缺失值`,
+    `③ 主指标「${state.main}」异常值（IQR 1.5× 法，正常区间 ${fmt(lo)} ~ ${fmt(hi)}）自动剔除：<b>${outliers}</b> 行`
+  ];
+  $('cleanBody').innerHTML=rows.map(r=>`<div style="margin:5px 0;">${r}</div>`).join('');
+  $('cleanCard').style.display='';
+}
+
 function renderPreview(rows){
   const tbl=$('previewTbl');
   const head=state.headers.slice(0,12);
@@ -537,11 +591,9 @@ document.querySelectorAll('[data-save]').forEach(btn=>{
   });
 });
 function downloadCSV(){
-  const rows=state.filtered.length?state.filtered:state.raw;
-  // 中位数填补缺失数值，便于导出干净数据
-  const filled=rows.map(r=>({...r}));
-  state.numeric.forEach(c=>{ const m=median(rows.map(r=>toNumber(r[c]))); filled.forEach(r=>{ if(!Number.isFinite(toNumber(r[c]))) r[c]=m; }); });
-  const ws=XLSX.utils.json_to_sheet(filled);
+  // 导出清洗后的数据（已去重 + 中位数填补；若已生成看板，则含主指标异常值剔除）
+  const rows=state.filtered.length?state.filtered:state.clean;
+  const ws=XLSX.utils.json_to_sheet(rows);
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'清洗后数据');
   XLSX.writeFile(wb,'清洗后数据.csv');
 }
