@@ -326,7 +326,8 @@ function generate(){
   renderDashboard(rows,main);
   $('dashboard').style.display='';
   $('dashboard').scrollIntoView({behavior:'smooth'});
-  showStatus(`看板已生成（筛选后 ${rows.length} 行）。点击每张图右上角或“保存图片”按钮可导出 PNG。`,false);
+  showStatus(`看板已生成（筛选后 ${rows.length} 行）。点击每张图右上角或“保存图片”按钮可导出 PNG。`
+    + (rows.length<20?`　⚠ 样本仅 ${rows.length} 行，第 1 张图已自动改成「点阵图」（一个点=一条数据）；数据超过 20 行才会显示直方图。`:''),false);
 }
 
 function renderDashboard(rows,main){
@@ -347,11 +348,48 @@ function renderDashboard(rows,main){
   ];
   $('kpis').innerHTML=kpis.map(k=>`<div class="kpi"><div class="v">${fmt(k.v)}</div><div class="l">${k.l}</div></div>`).join('');
 
-  // 图1 直方图
-  const histVals=mv;
-  Plotly.newPlot('c1',[{x:histVals,type:'histogram',marker:{color:'#2f6fed'}}],
-    {title:'',xaxis:{title:main},yaxis:{title:'频数'},margin:{t:20},paper_bgcolor:'#fff',plot_bgcolor:'#fff'},
-    {responsive:true,displaylogo:false});
+  // 图1 主指标分布：≥20 行用直方图（自适应分箱、频数刻度取整）；<20 行用点阵图（一点=一条数据）
+  const histVals=mv, nv=histVals.length;
+  const mean=mv.reduce((s,x)=>s+x,0)/(mv.length||1);
+  $('t1').textContent=`「${main}」分布`;
+  const baseLayout={
+    margin:{t:36}, paper_bgcolor:'#fff', plot_bgcolor:'#fff',
+    title:{text:`n=${nv} | 均值 ${fmt(mean)} | 中位数 ${fmt(med)} | 虚线=中位数，点线=均值`,
+           font:{size:11,color:'#7b8794'}, x:0, xanchor:'left', y:1, yanchor:'top'}
+  };
+  const refLines=[
+    {type:'line',x0:med,x1:med,y0:0,y1:1,yref:'paper',line:{color:'#e0a100',dash:'dash',width:1.5}},
+    {type:'line',x0:mean,x1:mean,y0:0,y1:1,yref:'paper',line:{color:'#d14343',dash:'dot',width:1.5}}
+  ];
+  if(nv>=20){
+    const b=autoBins(histVals);
+    const start=Math.floor(Math.min.apply(null,histVals)/b.width)*b.width;
+    const counts=new Array(b.nbins).fill(0);
+    histVals.forEach(v=>{ let k=Math.floor((v-start)/b.width); if(k<0)k=0; if(k>=b.nbins)k=b.nbins-1; counts[k]++; });
+    const ydtick=Math.max(1, Math.ceil(niceStep(Math.max.apply(null,counts)/6))); // 频数只显示整齐的整数刻度
+    Plotly.newPlot('c1',[{
+      x:histVals, type:'histogram', marker:{color:'#2f6fed'}, bargap:0.02,
+      xbins:{start:start, size:b.width, end:start+b.width*b.nbins},
+      hovertemplate:'区间 %{x}<br>频数 %{y} 条<extra></extra>'
+    }], Object.assign({},baseLayout,{
+      xaxis:{title:main, zeroline:false},
+      yaxis:{title:'频数（条）', rangemode:'tozero', dtick:ydtick, tickformat:'d', zeroline:false},
+      shapes:refLines
+    }),{responsive:true,displaylogo:false});
+  } else {
+    // 样本太少（<20 行）：直方图只会切成几根巨柱、什么也看不出来，
+    // 改成"每条数据一行"的阶梯点图：纵向排满，横向看分布
+    const sorted=histVals.slice().sort((a,b)=>a-b);
+    Plotly.newPlot('c1',[{
+      x:sorted, y:sorted.map((v,i)=>i), type:'scatter', mode:'markers',
+      marker:{size:12,color:'#2f6fed',line:{color:'#fff',width:1.5}},
+      hovertemplate:'%{x}<extra></extra>', showlegend:false
+    }], Object.assign({},baseLayout,{
+      xaxis:{title:main, zeroline:false},
+      yaxis:{title:'每条数据一行', showticklabels:false, dtick:1, zeroline:false, range:[-0.7, sorted.length-0.3]},
+      shapes:refLines
+    }),{responsive:true,displaylogo:false});
+  }
 
   // 图2 按分类均值
   if(state.catForGroup){
@@ -415,6 +453,33 @@ function quantile(sortedArr,q){
   return a[base+1]!==undefined ? a[base]+rest*(a[base+1]-a[base]) : a[base];
 }
 function fmt(v){ if(typeof v==='number'){ return Math.abs(v)>=10000? v.toLocaleString('zh-CN') : (Number.isInteger(v)? v : v.toFixed(2)); } return v; }
+
+// 取"好看"的分箱宽度（1 / 2 / 2.5 / 3 / 5 × 10^k），避免出现 37.4 这种刻度
+function niceStep(raw){
+  if(!(raw>0)) return 1;
+  const p=Math.pow(10,Math.floor(Math.log10(raw)));
+  const c=raw/p;
+  const m=c<=1?1:c<=2?2:c<=2.5?2.5:c<=3?3:c<=5?5:10;
+  return m*p;
+}
+// 自适应分箱：用 Freedman-Diaconis 规则算宽度，再把箱数夹在 [6, 40]，
+// 避免 Plotly 默认分箱在数据少/极值大时只切出 2~3 根巨型柱子
+function autoBins(vals){
+  const n=vals.length;
+  const mn=Math.min.apply(null,vals), mx=Math.max.apply(null,vals);
+  const span=mx-mn;
+  if(!(span>0)) return {width:1, nbins:1};
+  const q1=quantile(vals,0.25), q3=quantile(vals,0.75), iqr=q3-q1;
+  let w = iqr>0 ? 2*iqr/Math.cbrt(n) : span/Math.max(2,Math.ceil(Math.sqrt(n)));
+  if(!(w>0)) w=span/8;
+  const minBins = n>=50?8:6, maxBins=40;   // 箱数夹在 [6,40]：太少成巨柱，太多成锯齿
+  let nb=Math.ceil(span/w);
+  if(nb<minBins) w=niceStep(span/minBins);
+  nb=Math.ceil(span/w);
+  if(nb>maxBins){ w=niceStep(span/maxBins); nb=Math.ceil(span/w); }
+  return {width:w, nbins:Math.max(1,nb)};
+}
+
 
 function renderPreview(rows){
   const tbl=$('previewTbl');
