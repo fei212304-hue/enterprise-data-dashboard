@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta name="build-id" content="build-2026-10-25T16-28-40-403Z">
+<meta name="build-id" content="build-2026-10-30T08-48-25-458Z">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Excel 数据看板生成器 · 免安装网页版</title>
@@ -205,12 +205,119 @@ function showStatus(msg, isErr){
 function clearStatus(){ statusEl.className=''; statusEl.textContent=''; }
 
 // ---------- 工具函数 ----------
+// 把「1.5万」「1500.4元」「28岁」「45%」这类单元格还原成真正的数字
+const UNIT_CHARS='元件岁个次人台套辆张天月年条块家户份箱瓶米吨斤'.split('').join('');
+function stripText(v){
+  let s=String(v);
+  // 全角字母/数字 → 半角
+  s=s.replace(/[\uFF01-\uFF5E]/g,ch=>String.fromCharCode(ch.charCodeAt(0)-0xFEE0)).replace(/\u3000/g,' ');
+  return s;
+}
+function hasPercent(v){ return /%|％/.test(String(v)); }
 function toNumber(v){
   if(v===null||v===undefined||v==='') return NaN;
   if(typeof v==='number') return v;
-  const s=String(v).replace(/,/g,'').replace(/%/g,'').trim();
+  let s=stripText(v).trim();
+  if(!s) return NaN;
+  let mult=1;
+  if(/万亿/.test(s)){ mult=1e12; s=s.replace(/万亿/g,''); }
+  else if(/亿/.test(s)){ mult=1e8; s=s.replace(/亿/g,''); }
+  else if(/万/.test(s)){ mult=1e4; s=s.replace(/万/g,''); }
+  else if(/千/.test(s)){ mult=1e3; s=s.replace(/千/g,''); }
+  s=s.replace(/%|％/g,'').replace(/,/g,'').replace(/\s/g,'');
+  s=s.split('').filter(ch=>UNIT_CHARS.indexOf(ch)<0).join('');
+  s=s.replace(/[¥￥$]/g,'');
   const n=Number(s);
-  return Number.isFinite(n)?n:NaN;
+  if(!Number.isFinite(n)) return NaN;
+  return hasPercent(v)? n/100 : n*mult;   // 45% → 0.45
+}
+// 百分号列：整列多数带 % 才认定，避免个别值被误转
+function percentCols(rows, cols){
+  const out=[];
+  cols.forEach(h=>{
+    let nn=0,pct=0;
+    rows.forEach(r=>{ const v=r[h]; if(v===null||v===undefined||v==='') return; nn++; if(hasPercent(v)) pct++; });
+    if(nn>0 && pct/nn>=0.6) out.push({col:h, n:pct});
+  });
+  return out;
+}
+
+// ---------- 日期识别 ----------
+function isDateLike(v){
+  const t=String(v).trim();
+  return /^\d{4}[-\/年.]\d{1,2}[-\/月.]\d{1,2}(日)?(\s+\d{1,2}:\d{2}(:\d{2})?)?$/.test(t);
+}
+// Excel 日期序列号 → 日期（Excel 把 1899-12-30 当作 0，所以 44333 = 2021-05-17）
+// 只认得 1954~2119 这个合理区间，避免把「销售额 30000」误当成日期
+function serialToDate(n){
+  if(!Number.isFinite(n)||n<20000||n>80000) return null;
+  const d=new Date(Date.UTC(1899,11,30)+Math.round(n)*86400000);
+  if(isNaN(d.getTime())) return null;
+  return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+}
+const DATE_NAME_RE=/date|日期|时间|_dt$|^dt$|day|month|birth/i;
+function parseDateVal(v){
+  if(v===null||v===undefined||v==='') return null;
+  if(v instanceof Date) return isNaN(v.getTime())?null:v;
+  if(typeof v==='number') return serialToDate(v);   // 序列号形态的日期
+  let t=String(v).trim();
+  if(!isDateLike(t)) return null;
+  t=t.replace(/[年月]/g,'-').replace(/日/g,'').replace(/[\/.]/g,'-');
+  const d=new Date(t.split('-')[0]+'/'+t.split('-')[1]+'/'+t.split('-')[2]);
+  return isNaN(d.getTime())?null:d;
+}
+function fmtDate(d){
+  const p=n=>String(n).padStart(2,'0');
+  return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate());
+}
+// 找出"整列基本都是日期"的字段；这类字段不能当数值分析
+function detectDateCols(rows){
+  const headers=Object.keys(rows[0]||{});
+  const out=[];
+  for(const h of headers){
+    let nn=0, ok=0;
+    for(const r of rows){
+      const v=r[h];
+      if(v===null||v===undefined||v==='') continue;
+      nn++;
+      if(v instanceof Date){ if(!isNaN(v.getTime())) ok++; }
+      else if(typeof v==='string'&&isDateLike(v)&&parseDateVal(v)) ok++;
+      else if(typeof v==='number'&&DATE_NAME_RE.test(h)&&serialToDate(v)) ok++;  // 仍是序列号的兜底
+    }
+    if(nn>0 && ok/nn>=0.7) out.push(h);
+  }
+  return out;
+}
+// 日期规范化 + 剔除非法日期与未来日期
+function processDates(rows, dateCols){
+  const rep={invalid:0, future:0};
+  if(!dateCols.length) return {rows:rows, rep:rep};
+  const today=new Date(); today.setHours(23,59,59,999);
+  const out=[];
+  for(const r of rows){
+    let bad=false;
+    for(const h of dateCols){
+      const orig=r[h];
+      if(orig===null||orig===undefined||orig==='') continue;
+      const d=parseDateVal(orig);
+      if(!d){ rep.invalid++; bad=true; break; }
+      if(d>today){ rep.future++; bad=true; break; }
+      r[h]=fmtDate(d);
+    }
+    if(!bad) out.push(r);
+  }
+  return {rows:out, rep:rep};
+}
+
+// 偏度：判断分布是否严重歪斜（金额类常右偏，此时不应按 IQR 删记录）
+function skewness(a){
+  const v=a.filter(Number.isFinite);
+  const n=v.length;
+  if(n<8) return 0;
+  const m=v.reduce((s,x)=>s+x,0)/n;
+  const sd=Math.sqrt(v.reduce((s,x)=>s+(x-m)*(x-m),0)/n);
+  if(!sd) return 0;
+  return v.reduce((s,x)=>s+Math.pow((x-m)/sd,3),0)/n;
 }
 function isIdColumn(header, values, nRows){
   const kw=['id','编号','序号','单号','订单号','代码','学号','工号','编码','账户'];
@@ -231,19 +338,30 @@ function isIdColumn(header, values, nRows){
   const span=arr[arr.length-1]-arr[0]+1;          // 取值跨度
   return span <= uniq.size*2;                     // 近连续（允许少量缺号）才算编号
 }
-function classify(rows){
+function classify(rows, dateCols){
   const headers=Object.keys(rows[0]||{});
   const n=rows.length;
   const numeric=[],cats=[],idcols=[],other=[];
+  const dateSet=new Set(dateCols||[]);
   for(const h of headers){
+    // 日期列单独处理：既不当数值（会被算均值/中位数），也不当分类（取值太多没法筛选）
+    if(dateSet.has(h)) continue;
     const vals=rows.map(r=>r[h]);
     if(isIdColumn(h,vals,n)){ idcols.push(h); continue; }
+    // 兜底防线：列名像日期、且取值全是序列号/日期对象 → 绝不进数值列（否则会被拿去算均值）
+    if(DATE_NAME_RE.test(h)){
+      const vs=vals.filter(v=>v!==null&&v!==undefined&&v!=='');
+      if(vs.length && vs.every(v=>(v instanceof Date)||(typeof v==='number'&&serialToDate(v)))) continue;
+    }
     let num=0,nonNull=0;
     for(const v of vals){
       if(v===null||v===undefined||v==='') continue;
       nonNull++;
       if(Number.isFinite(toNumber(v))) num++;
     }
+    // 几乎全空的列（比如 CSV 结尾多了逗号，凭空多出 "Unnamed: 13" 这种列）直接忽略：
+    // 否则它会进入缺失填补，被凭空填出几万个中位数，既不真实也没意义
+    if(nonNull < Math.max(3, n*0.01)){ other.push(h); continue; }
     if(nonNull>0 && num/nonNull>=0.8) numeric.push(h);
     else if(nonNull>0) cats.push(h);
     else other.push(h);
@@ -281,27 +399,167 @@ function pickMain(numeric){
   return numeric[0]||null;
 }
 
-// ---------- 自动数据清洗（无需手动设置，按数据自动处理） ----------
-// 步骤：① 删除完全重复的行；② 数值列缺失值用该列中位数填补
-function cleanData(rows, numeric){
-  const report={ origRows:rows.length, dupRemoved:0, imputed:{}, cleanRows:0 };
-  // ① 去重：整行内容完全相同的视为重复，仅保留首次出现
-  const seen=new Set(); const dedup=[];
-  for(const r of rows){
-    const key=JSON.stringify(r);
-    if(seen.has(key)){ report.dupRemoved++; continue; }
-    seen.add(key); dedup.push(r);
-  }
-  // ② 缺失值填补：数值列用该列中位数填补空值（分类列保留原样）
-  const filled=dedup.map(r=>Object.assign({},r));
-  numeric.forEach(c=>{
-    const m=median(dedup.map(r=>toNumber(r[c])));
-    let cnt=0;
-    filled.forEach(r=>{ if(!Number.isFinite(toNumber(r[c]))){ r[c]=m; cnt++; } });
-    if(cnt>0) report.imputed[c]=cnt;
+// ---------- 表头归一化（去掉 Excel/CSV 首列常带的隐藏字符 BOM 与首尾空格） ----------
+function normalizeHeaders(rows){
+  if(!rows || !rows.length) return rows;
+  const keys=Object.keys(rows[0]);
+  const map={};
+  keys.forEach(k=>{
+    const nk=String(k).replace(/\uFEFF/g,'').replace(/^[\s\u3000]+|[\s\u3000]+$/g,'');
+    if(nk!==k) map[k]=nk;
   });
-  report.cleanRows=filled.length;
-  return { clean:filled, report };
+  if(!Object.keys(map).length) return rows;
+  return rows.map(r=>{
+    const o={};
+    keys.forEach(k=>{ o[map[k]||k]=r[k]; });
+    return o;
+  });
+}
+// 业务上"不可能为负 / 不可能为零"的数值列：按列名自动匹配，不做词库推断
+const VALUE_RULES=[
+  {re:/(^age$|_age$|年龄|岁数|周岁)/i,                                              min:1, max:120, label:'年龄应在 1~120 之间'},
+  {re:/(^qty$|^quantity$|_qty$|数量|销量|件数|个数|人数|次数|库存|单量|笔数)/i,      min:1, max:null, label:'数量应 ≥1（≤0 属无效记录）'},
+  {re:/(^unit[_ ]?price$|^price$|单价|售价|进价|价格|单价\()/i,                      min:0, max:null, label:'价格不应为负'}
+];
+function ruleFor(col){
+  const s=String(col);
+  for(const r of VALUE_RULES){ if(r.re.test(s)) return r; }
+  return null;
+}
+
+// ---------- 自动数据清洗（无需手动设置，按数据自动处理） ----------
+// 顺序：① 分类写法归一 → ② 完全重复行 → ③ 单号重复 → ④ 日期合法性
+//      → ⑤ 单位/字符转数字 + 剔除业务非法值 → ⑥ 数值缺失中位数填补
+function cleanData(rows, meta){
+  const numeric=(meta&&meta.numeric)||[];
+  const cats=(meta&&meta.cats)||[];
+  const idcols=(meta&&meta.idcols)||[];
+  const dateCols=(meta&&meta.dateCols)||[];
+  const rep={
+    origRows:rows.length, cleanRows:0,
+    dupRemoved:0, idDup:[], skippedIds:[],
+    dateInvalid:0, dateFuture:0,
+    illegal:[], normed:[], converted:[], imputed:{}, imputeTotal:0
+  };
+  let cur=rows.map(r=>Object.assign({},r));
+
+  // ① 分类写法归一：只合并「去空格 / 全角转半角 / 大小写」后本来就相同的写法（不合并近义词）
+  cats.forEach(c=>{
+    const groups=new Map();                       // 归一key -> Map(写法 -> 出现次数)
+    cur.forEach(r=>{
+      const v=r[c];
+      if(v===null||v===undefined||v==='') return;
+      const t=stripText(v).trim().replace(/\s+/g,' ');
+      if(!t) return;
+      const k=t.toLowerCase();
+      if(!groups.has(k)) groups.set(k,new Map());
+      const m=groups.get(k);
+      m.set(t,(m.get(t)||0)+1);
+    });
+    let nGroup=0, sample='';
+    groups.forEach(m=>{
+      if(m.size<2) return;                        // 只有一种写法，无需归一
+      nGroup++;
+      let best=null,bestN=-1;                     // 取出现最多的写法作为标准写法
+      m.forEach((n,v)=>{ if(n>bestN){ bestN=n; best=v; } });
+      if(!sample) sample=[...m.keys()].slice(0,4).join(' / ')+' → '+best;
+      cur.forEach(r=>{
+        const v=r[c];
+        if(v===null||v===undefined||v==='') return;
+        const t=stripText(v).trim().replace(/\s+/g,' ');
+        if(!t) return;
+        if(t!==best && t.toLowerCase()===best.toLowerCase()) r[c]=best;
+        else if(String(v)!==best && t===best) r[c]=best;
+      });
+    });
+    if(nGroup>0){
+      rep.normed.push({col:c, groups:nGroup, sample:sample});
+    }
+  });
+  // 统计归一实际改了多少单元格（与原始 rows 逐格比对）
+  if(rep.normed.length){
+    rep.normed.forEach(n=>{
+      let chg=0;
+      for(let i=0;i<cur.length;i++){
+        const a=String(rows[i]?rows[i][n.col]:''), b=String(cur[i]?cur[i][n.col]:'');
+        if(a!==b) chg++;
+      }
+      n.changed=chg;
+    });
+  }
+
+  // ② 完全重复行：整行内容相同只保留首次出现
+  const seenRow=new Set(); const dedup=[];
+  for(const r of cur){
+    const key=JSON.stringify(r);
+    if(seenRow.has(key)){ rep.dupRemoved++; continue; }
+    seenRow.add(key); dedup.push(r);
+  }
+  cur=dedup;
+
+  // ③ 单号重复：同一单号出现多次视为重复录入，保留首次
+  //    若某列重复率 >10%，说明它是「分组维度」而不是主键，跳过以免误删大量行
+  idcols.forEach(c=>{
+    const vals=cur.map(r=>r[c]).filter(v=>v!==null&&v!==undefined&&v!=='');
+    if(vals.length<2) return;
+    const uniq=new Set(vals.map(v=>String(v).trim()));
+    const dupRate=1-uniq.size/vals.length;
+    if(dupRate>0.1){ rep.skippedIds.push({col:c, rate:dupRate}); return; }
+    const seen=new Set(); const out=[]; let n=0;
+    for(const r of cur){
+      const v=r[c];
+      const k=(v===null||v===undefined||v==='')?null:String(v).trim();
+      if(k===null){ out.push(r); continue; }
+      if(seen.has(k)){ n++; continue; }
+      seen.add(k); out.push(r);
+    }
+    if(n>0){ rep.idDup.push({col:c, n:n}); cur=out; }
+  });
+
+  // ④ 日期合法性：非法日期 / 未来日期所在行整行删除
+  if(dateCols.length){
+    const d=processDates(cur, dateCols);
+    rep.dateInvalid=d.rep.invalid; rep.dateFuture=d.rep.future;
+    cur=d.rows;
+  }
+
+  // ⑤ 数值列：把「1.5万」「1500元」「45%」还原成数字；并按业务规则剔除非法值所在行
+  numeric.forEach(c=>{
+    const rule=ruleFor(c);
+    let conv=0, sample='';
+    const bad=new Set();
+    const vals=cur.map((r,i)=>{
+      const raw=r[c];
+      if(raw===null||raw===undefined||raw==='') return NaN;
+      const n=toNumber(raw);
+      if(!Number.isFinite(n)) return NaN;
+      const same = String(raw)===String(n);
+      if(!same){ conv++; if(!sample) sample=String(raw)+' → '+n; }
+      if(rule && (n<rule.min || (rule.max!==null && n>rule.max))) bad.add(i);
+      return n;
+    });
+    if(bad.size){
+      const samples=[];
+      bad.forEach(i=>{ if(samples.length<3) samples.push(String(cur[i][c])); });
+      rep.illegal.push({col:c, n:bad.size, sample:samples.join('、'), reason:rule.label});
+      cur=cur.filter((r,i)=>!bad.has(i));
+    }
+    const keep=vals.filter((v,i)=>!bad.has(i));
+    cur.forEach((r,i)=>{ if(Number.isFinite(keep[i])) r[c]=keep[i]; });
+    if(conv>0) rep.converted.push({col:c, n:conv, sample:sample});
+  });
+
+  // ⑥ 数值缺失：用该列中位数填补（分类列保留原样）
+  numeric.forEach(c=>{
+    const m=median(cur.map(r=>toNumber(r[c])));
+    if(!Number.isFinite(m)) return;
+    let cnt=0;
+    cur.forEach(r=>{ if(!Number.isFinite(toNumber(r[c]))){ r[c]=m; cnt++; } });
+    if(cnt>0){ rep.imputed[c]=cnt; rep.imputeTotal+=cnt; }
+  });
+
+  rep.cleanRows=cur.length;
+  return { clean:cur, report:rep };
 }
 
 // ---------- 读取文件 ----------
@@ -323,7 +581,9 @@ function handleFile(file){
   reader.onload=e=>{
     try{
       const data=new Uint8Array(e.target.result);
-      const wb=XLSX.read(data,{type:'array'});
+      // cellDates:true 很关键：不加这个参数，日期会被读成 Excel 序列号（如 44333），
+      // 之后就会被误当成普通数字去算均值、还拿中位数去填补"缺失"
+      const wb=XLSX.read(data,{type:'array',cellDates:true});
       state.wb=wb; state.sheets=wb.SheetNames;
       if(wb.SheetNames.length>1){
         $('sheetField').style.display='';
@@ -340,12 +600,17 @@ function handleFile(file){
 
 function loadSheet(name){
   const ws=state.wb.Sheets[name];
-  const rows=XLSX.utils.sheet_to_json(ws,{defval:null});
+  let rows=XLSX.utils.sheet_to_json(ws,{defval:null});
+  // 先修掉隐藏字符（CSV 首列名常带肉眼看不见的 BOM），否则后续取列会静默失败
+  rows=normalizeHeaders(rows);
   state.sheet=name; state.raw=rows;
-  const c=classify(rows);
+  // 日期列要先认出来：它必须排除在"数值列"之外，否则日期会被当成数字去算均值
+  const dateCols=detectDateCols(rows);
+  state.dateCols=dateCols;
+  const c=classify(rows, dateCols);
   Object.assign(state,c);
-  // 自动清洗（去重 + 中位数填补），结果用于分析与导出
-  const cc=cleanData(rows, c.numeric);
+  // 自动清洗（去重 / 分类归一 / 非法值 / 日期 / 单位换算 / 缺失填补）
+  const cc=cleanData(rows, {numeric:c.numeric, cats:c.cats, idcols:c.idcols, dateCols:dateCols});
   state.clean=cc.clean; state.cleanReport=cc.report;
   // 主指标
   const mainSel=$('mainSel'); mainSel.innerHTML='';
@@ -355,7 +620,7 @@ function loadSheet(name){
   // 筛选维度
   const fa=$('filterArea'); fa.innerHTML='';
   c.cats.forEach(col=>{
-    const uvs=uniqueVals(rows,col,30);
+    const uvs=uniqueVals(state.clean,col,30);   // 用清洗后的数据，筛选值才是归一后的写法
     if(uvs.length<2||uvs.length>30) return;
     const box=document.createElement('div'); box.className='fitem';
     box.innerHTML=`<div class="top"><input type="checkbox" class="fchk" value="${col}"><span>${col}</span></div>`;
@@ -390,10 +655,14 @@ function generate(){
   const main=$('mainSel').value;
   const filters=currentFilters();
   let rows=applyFilters(state.clean,filters);
-  // 主指标异常值（IQR 1.5× 法则）自动剔除
-  const mv=rows.map(r=>toNumber(r[main]));
+  // 主指标异常值（IQR 法）自动剔除
+  // 阈值不固定 1.5×：金额类数据通常严重右偏，用 1.5× 会把头部正常业务全当异常删掉，
+  // 所以按偏度自适应——分布越歪，判定越宽松（偏度 >1 用 3×，这是箱线图判定"极端值"的惯用法）
+  const mv=rows.map(r=>toNumber(r[main])).filter(Number.isFinite);
+  const sk=skewness(mv);
+  const k=Math.abs(sk)>1 ? 3 : 1.5;
   const q1=quantile(mv,0.25), q3=quantile(mv,0.75), iqr=q3-q1;
-  const lo=q1-1.5*iqr, hi=q3+1.5*iqr;
+  const lo=q1-k*iqr, hi=q3+k*iqr;
   const before=rows.length;
   let nLow=0, nHigh=0;
   rows=rows.filter(r=>{
@@ -408,7 +677,7 @@ function generate(){
   state.filtered=rows; state.main=main;
   state.catForGroup = state.cats.find(c=>c!==main) || null;
   state.catForDist  = state.cats[0] || null;
-  renderCleanReport(outliers, lo, hi, nLow, nHigh);
+  renderCleanReport(outliers, lo, hi, nLow, nHigh, k, sk);
   renderDashboard(rows,main,{outliers:outliers, lo:lo, hi:hi});
   $('dashboard').style.display='';
   $('dashboard').scrollIntoView({behavior:'smooth'});
@@ -564,28 +833,61 @@ function autoBins(vals){
 }
 
 
-// 清洗报告：展示自动清洗做了什么（去重 / 填补 / 剔异常值）
-function renderCleanReport(outliers, lo, hi, nLow, nHigh){
+// 清洗报告：把自动清洗每一步做了什么、动了多少行/多少格，逐条写出来
+function renderCleanReport(outliers, lo, hi, nLow, nHigh, k, sk){
   const rep=state.cleanReport||{};
-  const imp=rep.imputed||{};
-  const impKeys=Object.keys(imp);
-  const impTotal=impKeys.reduce((s,c)=>s+imp[c],0);
-  // 剔除方向说明：让读者知道被剔的是"特别大"还是"特别小"的企业
+  const out=[]; let step=0;
+  const N=v=>`<b>${v}</b>`;
+  out.push(`原始数据 ${N(rep.origRows||0)} 行，自动清洗后得到 ${N(state.filtered.length)} 行（分析与导出都基于清洗后的数据）。`);
+  if((state.other||[]).length){
+    out.push(`<span style="color:#8a6d3b;">已忽略几乎全空的字段：${(state.other||[]).join('、')}（有值的格子太少，通常是表格结尾多打了逗号造成的空列，不参与分析与填补）。</span>`);
+  }
+
+  // ① 重复行
+  out.push(`${++step}. 删除完全重复的行：${N(rep.dupRemoved||0)} 行`);
+  // ② 单号重复
+  if((rep.idDup||[]).length){
+    out.push(`${++step}. 同一单号重复录入（保留首次出现）：${(rep.idDup||[]).map(d=>d.col+' '+N(d.n)+' 行').join('、')}`);
+  }
+  if((rep.skippedIds||[]).length){
+    out.push(`<span style="color:#8a6d3b;">注意：${(rep.skippedIds||[]).map(d=>`「${d.col}」重复值占 ${(d.rate*100).toFixed(0)}%`).join('、')}，看起来是分组维度而不是编号，已跳过不处理，避免误删数据。</span>`);
+  }
+  // ③ 日期
+  if((rep.dateInvalid||0)>0 || (rep.dateFuture||0)>0){
+    out.push(`${++step}. 日期无法识别删除 ${N(rep.dateInvalid||0)} 行，晚于今天的日期删除 ${N(rep.dateFuture||0)} 行`);
+  }
+  // ④ 业务非法值
+  (rep.illegal||[]).forEach(d=>{
+    out.push(`${++step}. 「${d.col}」出现不可能的取值（${d.sample}），${d.reason}，删除 ${N(d.n)} 行`);
+  });
+  // ⑤ 分类写法归一
+  (rep.normed||[]).forEach(d=>{
+    out.push(`${++step}. 分类列「${d.col}」写法统一：${N(d.groups)} 组同义写法合并（如 ${d.sample}），共改 ${N(d.changed||0)} 个单元格`);
+  });
+  // ⑥ 单位/字符转数字
+  (rep.converted||[]).forEach(d=>{
+    out.push(`${++step}. 「${d.col}」含单位或文字，已转成数字共 ${N(d.n)} 个（如 ${d.sample}）`);
+  });
+  // ⑦ 缺失填补
+  const impKeys=Object.keys(rep.imputed||{});
+  out.push(impKeys.length
+    ? `${++step}. 数值缺失用该列中位数填补：共 ${N(rep.imputeTotal||0)} 个（${impKeys.map(c=>c+' '+rep.imputed[c]+'个').join('、')}）`
+    : `${++step}. 数值缺失用该列中位数填补：未检测到缺失值`);
+  // ⑧ 异常值
+  out.push(`${++step}. 主指标「${state.main}」异常值剔除：${N(outliers)} 行`
+    +`（判定区间 ${fmtBound(lo)} ~ ${fmtBound(hi)}，用 ${k}×IQR 法则）`);
   const dirs=[];
   if(nLow>0) dirs.push(`${nLow} 行明显偏小`);
   if(nHigh>0) dirs.push(`${nHigh} 行明显偏大`);
-  const dirTxt = outliers>0 && dirs.length ? `（其中 ${dirs.join('、')}）` : '';
-  const rows=[];
-  rows.push(`原始数据 <b>${rep.origRows||0}</b> 行，自动清洗后得到 <b>${state.filtered.length}</b> 行（分析即基于清洗后的数据）。`);
-  rows.push(`① 删除完全重复的行：<b>${rep.dupRemoved||0}</b> 行`);
-  rows.push(impKeys.length
-    ? `② 缺失值中位数填补：共 <b>${impTotal}</b> 个（${impKeys.map(c=>c+' '+imp[c]+'个').join('、')}）`
-    : `② 缺失值中位数填补：未检测到缺失值`);
-  rows.push(`③ 主指标「${state.main}」异常值（IQR 1.5× 法，正常区间 ${fmtBound(lo)} ~ ${fmtBound(hi)}）自动剔除：<b>${outliers}</b> 行${dirTxt}`);
-  if(outliers>0){
-    rows.push(`<span style="color:#8a6d3b;">提示：IQR 法把「数值特别大或特别小」的个体判为异常，它们往往是真实存在的大型/微型企业而非录入错误，剔除后结果代表的是「主体企业」的普遍规律。</span>`);
+  if(outliers>0 && dirs.length){
+    out.push(`<span style="color:#8a6d3b;">其中 ${dirs.join('、')}。</span>`);
   }
-  $('cleanBody').innerHTML=rows.map(r=>`<div style="margin:5px 0;">${r}</div>`).join('');
+  if(k>1.5){
+    out.push(`<span style="color:#8a6d3b;">提示：「${state.main}」分布明显偏斜（偏度 ${Number(sk).toFixed(2)}，尾部拖得很长），此时按常规 1.5× 判定会把大量真实的大额业务误判成异常，因此自动放宽到 ${k}×（箱线图的"极端值"标准）。</span>`);
+  } else if(outliers>0){
+    out.push(`<span style="color:#8a6d3b;">提示：IQR 法把"数值特别大或特别小"的个体判为异常，它们往往是真实存在的大型/微型个体而非录入错误，剔除后结果代表的是"主体部分"的普遍规律。</span>`);
+  }
+  $('cleanBody').innerHTML=out.map(r=>`<div style="margin:5px 0;">${r}</div>`).join('');
   $('cleanCard').style.display='';
 }
 
