@@ -108,6 +108,11 @@
   <div id="status"></div>
 
   <div id="dashboard" style="display:none;">
+    <div class="card" id="profileCard" style="display:none;border-left:4px solid var(--brand);">
+      <h3 style="margin:0 0 10px;font-size:16px;">数据概况画像（上传后自动生成）</h3>
+      <div class="kpis" id="profileKpis"></div>
+      <div id="profileBody" style="margin-top:4px;"></div>
+    </div>
     <div class="card" id="cleanCard" style="display:none;border-left:4px solid var(--brand2);">
       <h3 style="margin:0 0 10px;font-size:16px;">数据清洗报告（已自动完成，无需手动设置）</h3>
       <div id="cleanBody"></div>
@@ -773,6 +778,115 @@ function applyFilters(rows,filters){
   if(!filters.length) return rows.slice();
   return rows.filter(r=>filters.every(([c,v])=> String(r[c])===String(v)));
 }
+// ---------- 数据概况画像：上传后自动生成，描述数据集的业务面貌 ----------
+// 与清洗报告的分工：清洗报告讲"我删了什么"，画像讲"这份数据本身长什么样、
+// 哪些现象是正常业务、哪些是脏数据"——结论可直接引用进作业。
+function computeProfile(rows, main){
+  const p={ n:rows.length };
+  // 有效字段数：非空值不足 max(3, 行数×1%) 的列（表尾多余逗号产生的空列）不计入
+  const headers=state.headers||[];
+  let ignored=0;
+  headers.forEach(h=>{
+    let nn=0;
+    rows.forEach(r=>{ const v=r[h]; if(v!==null&&v!==undefined&&v!=='') nn++; });
+    if(nn < Math.max(3, rows.length*0.01)) ignored++;
+  });
+  p.fields=headers.length-ignored; p.ignored=ignored;
+  // ① 时间跨度与年度分布（日期行数过半才给出，避免把纯数字误当天）
+  const ds=[];
+  (state.dateCols||[]).forEach(c=>rows.forEach(r=>{ const d=parseDateVal(r[c]); if(d) ds.push(d); }));
+  if(ds.length>rows.length*0.5){
+    ds.sort((a,b)=>a-b);
+    p.dMin=ds[0]; p.dMax=ds[ds.length-1];
+    const yr={};
+    ds.forEach(d=>{ const y=d.getFullYear(); yr[y]=(yr[y]||0)+1; });
+    p.years=yr;
+    const ys=Object.keys(yr).sort();
+    const last=ys[ys.length-1];
+    const prev=ys.slice(0,-1).map(y=>yr[y]).sort((a,b)=>a-b);
+    // 尾年数据量不足前几年中位数的 40% → 疑似采集在中途截止
+    if(prev.length>=1 && yr[last] < prev[Math.floor(prev.length/2)]*0.4) p.partialYear=last;
+  }
+  // ② 主指标结构：离散档位 or 连续分布（决定异常值用哪套判据）
+  p.main=main;
+  const mv=rows.map(r=>toNumber(r[main])).filter(Number.isFinite);
+  p.sk=skewness(mv);
+  p.tier=isolatedTiers(mv);
+  // ③ 主体特征：编号列的唯一值数与多条记录数
+  const idc=(state.idcols||[])[0];
+  if(idc){
+    const seen=new Map();
+    rows.forEach(r=>{ const v=r[idc]; if(v===null||v===undefined||v==='') return; seen.set(v,(seen.get(v)||0)+1); });
+    let multi=0;
+    seen.forEach(c=>{ if(c>1) multi++; });
+    p.idCol=idc; p.entities=seen.size; p.multi=multi;
+  }
+  // ④ 分类分布健康度：最大占比（对照 85% 抽样偏差预警线）
+  p.catShares=[];
+  (state.cats||[]).slice(0,3).forEach(c=>{
+    const cnt=new Map(); let tot=0;
+    rows.forEach(r=>{ const v=r[c]; if(v===null||v===undefined||v==='') return; cnt.set(v,(cnt.get(v)||0)+1); tot++; });
+    if(tot<10 || cnt.size<2) return;
+    let top=null, topN=0;
+    cnt.forEach((k,v)=>{ if(k>topN){ topN=k; top=v; } });
+    p.catShares.push({col:c, val:top, share:topN/tot});
+  });
+  // ⑤ 缺失机制：诊断在清洗前的原始数据上算（填补后就看不出缺失了）
+  p.diag=(state.cleanReport&&state.cleanReport.diag)||{};
+  return p;
+}
+
+function renderProfile(res){
+  const p=state.profile; if(!p) return;
+  const kpis=[{v:fmt(p.n)+' 行', l:`数据规模（${p.fields} 个有效字段${p.ignored?`，另有 ${p.ignored} 个空列已忽略`:''}）`}];
+  if(p.dMin){
+    const f=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+    kpis.push({v:`${f(p.dMin)} ~ ${f(p.dMax)}`, l:'时间跨度'});
+  }
+  if(p.tier) kpis.push({v:'离散价目表', l:`主指标「${p.main}」共 ${p.tier.distinct} 档`});
+  else       kpis.push({v:'连续分布', l:`主指标「${p.main}」偏度 ${p.sk.toFixed(2)}`});
+  if(p.entities!==undefined){
+    kpis.push({v:fmt(p.entities), l:`「${p.idCol}」唯一主体` + (p.multi?`（${p.multi} 个多条记录）`:'')});
+  }
+  $('profileKpis').innerHTML=kpis.map(k=>`<div class="kpi"><div class="v">${k.v}</div><div class="l">${k.l}</div></div>`).join('');
+
+  const out=[];
+  if(p.tier){
+    const base=`主指标「${p.main}」是<b>离散档位结构</b>（${p.tier.distinct} 个固定取值，最高频档 ${fmt(p.tier.maxTier)} 行，正常档上限 ${fmtBound(p.tier.solidMax)}）。`;
+    if(res && res.method==='tier'){
+      out.push(base+`这类结构用<b>孤立档判据</b>找造假值比 IQR 统计法更准确，本次已按此判据执行。`);
+      if(p.tier.iso.length){
+        out.push(`检出 <b>${p.tier.iso.length} 个孤立档</b>：全表只出现零星几次、又高于正常档上限，是造假值/录入错误的典型特征。正常的高价商品每档都有大量订单，不会被误删。`);
+      }
+    } else {
+      out.push(base+`本次未发现需要按档位剔除的孤立造假值${(res&&res.method==='iqr')?`，异常值按 IQR 法处理（剔除 ${fmt(res.outliers)} 行）`:''}。`);
+    }
+  } else {
+    out.push(`主指标「${p.main}」是<b>连续分布</b>（偏度 ${p.sk.toFixed(2)}），异常值按偏度自适应 IQR 法处理。`);
+  }
+  if(p.partialYear){
+    out.push(`<span style="color:#8a6d3b;">注意：${p.partialYear} 年的数据量明显少于往年（疑似采集在中途截止），做年度趋势对比时请说明这一点。</span>`);
+  }
+  if(p.catShares.length){
+    const worst=p.catShares.slice().sort((a,b)=>b.share-a.share)[0];
+    if(worst.share>=0.85){
+      out.push(`<span style="color:#8a6d3b;">注意：分类「${worst.col}」中「${worst.val}」占 ${(worst.share*100).toFixed(0)}%，抽样明显偏斜，小类目上的结论不可靠。</span>`);
+    } else {
+      out.push(`分类分布健康：最大占比是「${worst.col}」的「${worst.val}」（${(worst.share*100).toFixed(1)}%），未达抽样偏差预警线（85%）。`);
+    }
+  }
+  const mnar=(p.diag.mnar||[]);
+  if(mnar.length){
+    out.push(`<span style="color:#8a6d3b;">缺失机制提醒：${mnar.map(d=>`「${d.col}」的缺失集中在「${d.g}=${d.v}」组`).join('、')}，属于非随机缺失（MNAR），填补可能引入偏差。</span>`);
+  }
+  if(p.entities!==undefined){
+    const dup=(state.cleanReport&&state.cleanReport.dupRemoved)||0;
+    out.push(`「${p.idCol}」共 ${fmt(p.entities)} 个唯一主体${p.multi?`，其中 ${p.multi} 个存在多条记录`:''}${dup?`；另有 ${fmt(dup)} 行完全重复数据已在清洗中删除`:''}。`);
+  }
+  $('profileBody').innerHTML=out.map(r=>`<div style="margin:6px 0;line-height:1.6;">${r}</div>`).join('');
+  $('profileCard').style.display='';
+}
+
 function generate(){
   const main=$('mainSel').value;
   const filters=currentFilters();
@@ -783,6 +897,9 @@ function generate(){
   state.filtered=rows; state.main=main;
   state.catForGroup = state.cats.find(c=>c!==main) || null;
   state.catForDist  = state.cats[0] || null;
+  // 画像基于清洗后的全量数据（不受筛选影响），异常值判据结果一并写入
+  state.profile=computeProfile(state.clean, main);
+  renderProfile(res);
   renderCleanReport(res.outliers, res.lo, res.hi, res.nLow, res.nHigh, res.k, res.sk, res);
   renderDashboard(rows,main,{outliers:res.outliers, lo:res.lo, hi:res.hi});
   $('dashboard').style.display='';
