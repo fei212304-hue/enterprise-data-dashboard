@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta name="build-id" content="build-2026-11-13T03-59-09-409Z">
+<meta name="build-id" content="build-2026-11-13T08-13-52-260Z">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Excel 数据看板生成器 · 免安装网页版</title>
@@ -115,8 +115,15 @@
       <div id="profileBody" style="margin-top:4px;"></div>
     </div>
     <div class="card" id="cleanCard" style="display:none;border-left:4px solid var(--brand2);">
-      <h3 style="margin:0 0 10px;font-size:16px;">数据清洗报告（已自动完成，无需手动设置）</h3>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:0 0 10px;">
+        <h3 style="margin:0;font-size:16px;">数据清洗报告（已自动完成，无需手动设置）</h3>
+        <button class="ghost" id="exportReportBtn">导出报告</button>
+      </div>
       <div id="cleanBody"></div>
+      <details id="removedDetails" style="display:none;margin-top:12px;">
+        <summary id="removedSummary" style="cursor:pointer;color:var(--brand);font-size:13px;">查看被删的行明细</summary>
+        <div id="removedBody" style="margin-top:8px;max-height:320px;overflow:auto;"></div>
+      </details>
     </div>
     <div class="kpis" id="kpis"></div>
     <div class="card chart-card">
@@ -293,9 +300,9 @@ function detectDateCols(rows){
   }
   return out;
 }
-// 日期规范化 + 剔除非法日期与未来日期
+// 日期规范化 + 剔除非法日期与未来日期（被删的行连同原因一并返回，供"被删行明细"展示）
 function processDates(rows, dateCols){
-  const rep={invalid:0, future:0};
+  const rep={invalid:0, future:0, removed:[]};
   if(!dateCols.length) return {rows:rows, rep:rep};
   const today=new Date(); today.setHours(23,59,59,999);
   const out=[];
@@ -305,8 +312,8 @@ function processDates(rows, dateCols){
       const orig=r[h];
       if(orig===null||orig===undefined||orig==='') continue;
       const d=parseDateVal(orig);
-      if(!d){ rep.invalid++; bad=true; break; }
-      if(d>today){ rep.future++; bad=true; break; }
+      if(!d){ rep.invalid++; rep.removed.push({row:r, reason:'日期无法识别（'+orig+'）'}); bad=true; break; }
+      if(d>today){ rep.future++; rep.removed.push({row:r, reason:'未来日期（'+fmtDate(d)+'）'}); bad=true; break; }
       r[h]=fmtDate(d);
     }
     if(!bad) out.push(r);
@@ -469,8 +476,11 @@ function cleanData(rows, meta){
     dupRemoved:0, idDup:[], idEmpty:[], idEmptyKept:[], skippedIds:[],
     dateInvalid:0, dateFuture:0,
     illegal:[], normed:[], converted:[], imputed:{}, imputeTotal:0,
-    conflict:null, mainMissing:0, catFilled:null, diag:null
+    conflict:null, mainMissing:0, catFilled:null, diag:null, removedRows:[]
   };
+  // 被删行收集：每删一行记录 {row, reason}，供"被删行明细"供人工抽查（上限 5000 条防内存爆）
+  const removed=[];
+  const drop=(r,reason)=>{ if(removed.length<5000) removed.push({row:r, reason:reason}); };
   // ⓪ 诊断（只提示、不改数据）：缺失机制 / 抽样偏差 / 录入截断
   rep.diag=computeDiagnostics(rows, numeric, cats, idcols);
   let cur=rows.map(r=>Object.assign({},r));
@@ -524,7 +534,7 @@ function cleanData(rows, meta){
   const seenRow=new Set(); const dedup=[];
   for(const r of cur){
     const key=JSON.stringify(r);
-    if(seenRow.has(key)){ rep.dupRemoved++; continue; }
+    if(seenRow.has(key)){ rep.dupRemoved++; drop(r,'完全重复行'); continue; }
     seenRow.add(key); dedup.push(r);
   }
   cur=dedup;
@@ -549,8 +559,8 @@ function cleanData(rows, meta){
     for(const r of cur){
       const v=r[c];
       const k=(v===null||v===undefined||v==='')?null:String(v).trim();
-      if(k===null){ nEmpty++; continue; }          // 主键为空：无法核对唯一性，删除
-      if(seen.has(k)){ n++; continue; }
+      if(k===null){ nEmpty++; drop(r,'「'+c+'」为空'); continue; }          // 主键为空：无法核对唯一性，删除
+      if(seen.has(k)){ n++; drop(r,'「'+c+'」重复录入（'+k+'）'); continue; }
       seen.add(k); out.push(r);
     }
     // 空值太多说明这列的空值可能是有意义的业务状态，保守起见不删
@@ -563,7 +573,7 @@ function cleanData(rows, meta){
         const v=r[c];
         const k=(v===null||v===undefined||v==='')?null:String(v).trim();
         if(k===null){ out2.push(r); continue; }
-        if(seen2.has(k)){ n2++; continue; }
+        if(seen2.has(k)){ n2++; drop(r,'「'+c+'」重复录入（'+k+'）'); continue; }
         seen2.add(k); out2.push(r);
       }
       if(n2>0){ rep.idDup.push({col:c, n:n2}); cur=out2; }
@@ -578,6 +588,7 @@ function cleanData(rows, meta){
   if(dateCols.length){
     const d=processDates(cur, dateCols);
     rep.dateInvalid=d.rep.invalid; rep.dateFuture=d.rep.future;
+    d.rep.removed.forEach(x=>drop(x.row, x.reason));
     cur=d.rows;
   }
 
@@ -600,6 +611,7 @@ function cleanData(rows, meta){
       const samples=[];
       bad.forEach(i=>{ if(samples.length<3) samples.push(String(cur[i][c])); });
       rep.illegal.push({col:c, n:bad.size, sample:samples.join('、'), reason:rule.label});
+      bad.forEach(i=>drop(cur[i], rule.label+'（'+c+'='+cur[i][c]+'）'));
       cur=cur.filter((r,i)=>!bad.has(i));
     }
     const keep=vals.filter((v,i)=>!bad.has(i));
@@ -635,6 +647,7 @@ function cleanData(rows, meta){
         samples.push(`${r[qtyCol]}×${r[priceCol]}应为${Math.round(r[qtyCol]*r[priceCol]*100)/100}，但${amtCol}写${r[amtCol]}`);
       });
       rep.conflict={qty:qtyCol, price:priceCol, amt:amtCol, n:badIdx.length, rate:rate, deleted:true, sample:samples.join('；')};
+      badIdx.forEach(i=>drop(cur[i],'逻辑矛盾（'+amtCol+'≠'+qtyCol+'×'+priceCol+'）'));
       cur=cur.filter((r,i)=>!bad.has(i));
     } else {
       // 关系本身不成立（可能含运费、折扣），不做删除，只记录
@@ -650,6 +663,7 @@ function cleanData(rows, meta){
     let miss=0;
     cur.forEach(r=>{ if(!Number.isFinite(toNumber(r[main]))) miss++; });
     if(miss>0 && miss<=cur.length*0.05){
+      cur.forEach(r=>{ if(!Number.isFinite(toNumber(r[main]))) drop(r,'主指标「'+main+'」缺失'); });
       cur=cur.filter(r=>Number.isFinite(toNumber(r[main])));
       rep.mainMissing=miss;
     }
@@ -670,6 +684,7 @@ function cleanData(rows, meta){
   if(Object.keys(catFilled).length) rep.catFilled=catFilled;
 
   rep.cleanRows=cur.length;
+  rep.removedRows=removed;
   return { clean:cur, report:rep };
 }
 
@@ -678,7 +693,7 @@ function cleanData(rows, meta){
 // ⑭ 抽样偏差：某分类取值占比过高，分组对比时小类结论不可靠
 // ⑯ 录入截断：编号列里混着明显偏短的值（如单号少打了几位）
 function computeDiagnostics(rows, numeric, cats, idcols){
-  const diag={ mnar:[], bias:[], trunc:[] };
+  const diag={ mnar:[], bias:[], trunc:[], shift:[] };
   const n=rows.length;
   if(!n) return diag;
   numeric.forEach(c=>{
@@ -723,6 +738,20 @@ function computeDiagnostics(rows, numeric, cats, idcols){
     rows.forEach(r=>{ const v=r[g]; if(v===null||v===undefined||v==='') return;
       if(String(v).length<med*0.6){ short++; if(!sample) sample=String(v); } });
     if(short>0 && short<=lens.length*0.05) diag.trunc.push({col:g, n:short, med:med, sample:sample});
+  });
+  // ⑰ 字段错位：分类列里混入少量纯数字值 —— 典型成因是「引号内逗号」
+  //   （价格写成 "1,200"，简易解析器按逗号切开，整行右移一列）。
+  //   网页版无法自动还原，只能提示用户换标准解析器（Excel/pandas）重新导出后再上传。
+  cats.forEach(g=>{
+    let tot=0, numLike=0, sample=null;
+    rows.forEach(r=>{
+      const v=r[g];
+      if(v===null||v===undefined||v==='') return;
+      tot++;
+      const s=String(v).trim();
+      if(s && Number.isFinite(toNumber(s))){ numLike++; if(!sample) sample=s; }
+    });
+    if(tot>=20 && numLike>0 && numLike<=tot*0.05) diag.shift.push({col:g, n:numLike, sample:sample});
   });
   return diag;
 }
@@ -805,6 +834,7 @@ function loadSheet(name){
 // ---------- 生成看板 ----------
 $('genBtn').addEventListener('click',generate);
 $('csvBtn').addEventListener('click',downloadCSV);
+$('exportReportBtn').addEventListener('click',exportReport);
 
 function currentFilters(){
   const out=[];
@@ -888,6 +918,7 @@ function renderProfile(res){
   if(p.entities!==undefined){
     kpis.push({v:fmt(p.entities), l:`「${p.idCol}」唯一主体` + (p.multi?`（${p.multi} 个多条记录）`:'')});
   }
+  state.profileKpis=kpis;
   $('profileKpis').innerHTML=kpis.map(k=>`<div class="kpi"><div class="v">${k.v}</div><div class="l">${k.l}</div></div>`).join('');
 
   const out=[];
@@ -923,6 +954,7 @@ function renderProfile(res){
     const dup=(state.cleanReport&&state.cleanReport.dupRemoved)||0;
     out.push(`「${p.idCol}」共 ${fmt(p.entities)} 个唯一主体${p.multi?`，其中 ${p.multi} 个存在多条记录`:''}${dup?`；另有 ${fmt(dup)} 行完全重复数据已在清洗中删除`:''}。`);
   }
+  state.profileLines=out;
   $('profileBody').innerHTML=out.map(r=>`<div style="margin:6px 0;line-height:1.6;">${r}</div>`).join('');
   $('profileCard').style.display='';
 }
@@ -939,6 +971,8 @@ function generate(){
   state.catForDist  = state.cats[0] || null;
   // 画像基于清洗后的全量数据（不受筛选影响），异常值判据结果一并写入
   state.profile=computeProfile(state.clean, main);
+  // 被删行明细 = 清洗阶段删的 + 异常值阶段删的
+  state.removed=((state.cleanReport&&state.cleanReport.removedRows)||[]).concat(res.removed||[]);
   renderProfile(res);
   renderCleanReport(res.outliers, res.lo, res.hi, res.nLow, res.nHigh, res.k, res.sk, res);
   renderDashboard(rows,main,{outliers:res.outliers, lo:res.lo, hi:res.hi});
@@ -967,24 +1001,25 @@ function removeOutliers(rows, main){
   }
   const before=rows.length;
   let nLow=0, nHigh=0, out;
+  const removed=[];
   if(method==='tier'){
     const isoSet=new Set(tierInfo.iso);
     out=rows.filter(r=>{
       const v=toNumber(r[main]);
-      if(!Number.isFinite(v)) return false;
-      if(isoSet.has(v)){ nHigh++; return false; }
+      if(!Number.isFinite(v)){ removed.push({row:r, reason:'主指标「'+main+'」非数值'}); return false; }
+      if(isoSet.has(v)){ nHigh++; removed.push({row:r, reason:'异常值（孤立档 '+fmtBound(v)+'，正常档上限 '+fmtBound(tierInfo.solidMax)+'）'}); return false; }
       return true;
     });
   } else {
     out=rows.filter(r=>{
       const v=toNumber(r[main]);
-      if(!Number.isFinite(v)) return false;
-      if(v<lo){ nLow++; return false; }
-      if(v>hi){ nHigh++; return false; }
+      if(!Number.isFinite(v)){ removed.push({row:r, reason:'主指标「'+main+'」非数值'}); return false; }
+      if(v<lo){ nLow++; removed.push({row:r, reason:'异常值（'+fmtBound(v)+' 低于区间下限 '+fmtBound(lo)+'）'}); return false; }
+      if(v>hi){ nHigh++; removed.push({row:r, reason:'异常值（'+fmtBound(v)+' 高于区间上限 '+fmtBound(hi)+'）'}); return false; }
       return true;
     });
   }
-  return {rows:out, outliers:before-out.length, lo:lo, hi:hi, nLow:nLow, nHigh:nHigh, k:k, sk:sk, method:method, tierInfo:tierInfo};
+  return {rows:out, outliers:before-out.length, lo:lo, hi:hi, nLow:nLow, nHigh:nHigh, k:k, sk:sk, method:method, tierInfo:tierInfo, removed:removed};
 }
 
 function renderDashboard(rows,main,stats){
@@ -1232,6 +1267,30 @@ function renderCleanReport(outliers, lo, hi, nLow, nHigh, k, sk){
   (diag.trunc||[]).forEach(d=>{
     out.push(`<span style="color:#8a6d3b;">诊断：「${d.col}」有 ${N(d.n)} 个值明显比正常编号短（如「${d.sample}」，正常约 ${d.med} 位），疑似录入截断。未自动修改，建议人工核对。</span>`);
   });
+  (diag.shift||[]).forEach(d=>{
+    out.push(`<span style="color:#c0392b;">警告：分类列「${d.col}」中混入了 ${N(d.n)} 个数字值（如「${d.sample}」），疑似「引号内逗号」导致整行字段错位（例如价格写成 "1,200"，被按逗号拆成两列后整体右移）。本工具无法自动还原，建议用 Excel/WPS 或 pandas 重新导出 CSV 后再上传，或人工核对原始文件中含引号逗号的行。</span>`);
+  });
+  // 被删行明细：列出每一行被删的原因与内容，供人工抽查是否误删
+  const rm=(state.removed||[]);
+  if(rm.length){
+    const heads=(state.headers||[]).slice(0,8);
+    let html='<table style="border-collapse:collapse;font-size:12px;width:100%;">'
+      +'<thead><tr><th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--line);white-space:nowrap;">删除原因</th>'
+      +heads.map(h=>`<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--line);white-space:nowrap;">${escHtml(h)}</th>`).join('')+'</tr></thead><tbody>';
+    rm.slice(0,100).forEach(x=>{
+      html+='<tr><td style="padding:4px 8px;border-bottom:0.5px solid var(--line);color:#c0392b;white-space:nowrap;">'+escHtml(x.reason)+'</td>'
+        +heads.map(h=>`<td style="padding:4px 8px;border-bottom:0.5px solid var(--line);max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(x.row[h])}</td>`).join('')+'</tr>';
+    });
+    html+='</tbody></table>';
+    if(rm.length>100) html+=`<div class="hint" style="margin-top:6px;">共 ${rm.length} 行，此处仅显示前 100 行；完整明细见「导出报告」。</div>`;
+    $('removedSummary').textContent=`查看被删的 ${rm.length} 行明细（含删除原因，可人工抽查是否误删）`;
+    $('removedBody').innerHTML=html;
+    $('removedDetails').style.display='';
+  } else {
+    $('removedDetails').style.display='none';
+  }
+  // 存下全文供「导出报告」使用
+  state.reportLines=out;
   $('cleanBody').innerHTML=out.map(r=>`<div style="margin:5px 0;">${r}</div>`).join('');
   $('cleanCard').style.display='';
 }
@@ -1243,6 +1302,10 @@ function fmtBound(v){
   if(a>=1000) return Math.round(v).toLocaleString('zh-CN');
   if(a>=10) return String(Math.round(v*10)/10);
   return String(Math.round(v*100)/100);
+}
+// HTML 转义：被删行的原始内容可能含 < > & " 等字符，直接拼进表格会破坏结构
+function escHtml(v){
+  return String(v===null||v===undefined?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 function renderPreview(rows){
@@ -1266,6 +1329,33 @@ function downloadCSV(){
   const ws=XLSX.utils.json_to_sheet(rows);
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'清洗后数据');
   XLSX.writeFile(wb,'清洗后数据.csv');
+}
+// 导出清洗报告（纯文本，可直接粘进作业文档）：画像 + 清洗步骤 + 被删行明细
+function exportReport(){
+  const strip=s=>String(s).replace(/<[^>]*>/g,'').replace(/&nbsp;/g,' ');
+  const L=[];
+  L.push('数据清洗报告（自动生成于 '+new Date().toLocaleString('zh-CN')+'）');
+  L.push('数据表：'+(state.sheet||'-'));
+  L.push('');
+  L.push('一、数据概况画像');
+  (state.profileKpis||[]).forEach(k=>L.push('  '+k.l+'：'+k.v));
+  (state.profileLines||[]).forEach(s2=>L.push('  · '+strip(s2)));
+  L.push('');
+  L.push('二、清洗步骤');
+  (state.reportLines||[]).forEach(s2=>L.push('  '+strip(s2)));
+  const rm=state.removed||[];
+  if(rm.length){
+    L.push('');
+    L.push('三、被删行明细（共 '+rm.length+' 行）');
+    const heads=(state.headers||[]).slice(0,8);
+    rm.forEach(x=>{ L.push('  ['+x.reason+'] '+heads.map(h=>h+'='+x.row[h]).join(' ｜ ')); });
+  }
+  const blob=new Blob(['\ufeff'+L.join('\n')],{type:'text/plain;charset=utf-8'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='数据清洗报告.txt';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),3000);
 }
 // ---------- 启动自检：把两个库的加载状态写到 <html data-libs>，方便排查 ----------
 (function selfCheck(){
