@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta name="build-id" content="build-2026-11-13T08-13-52-260Z">
+<meta name="build-id" content="build-2026-11-16T13-21-16-426Z">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Excel 数据看板生成器 · 免安装网页版</title>
@@ -124,6 +124,18 @@
         <summary id="removedSummary" style="cursor:pointer;color:var(--brand);font-size:13px;">查看被删的行明细</summary>
         <div id="removedBody" style="margin-top:8px;max-height:320px;overflow:auto;"></div>
       </details>
+    </div>
+    <div class="card" id="reliabCard" style="display:none;border-left:4px solid #7c5cff;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:0 0 10px;">
+        <h3 style="margin:0;font-size:16px;">问卷量表信度分析（自动识别，无需设置）</h3>
+        <button class="ghost" id="exportRelBtn">导出信度报告</button>
+      </div>
+      <div class="kpis" id="relKpis"></div>
+      <div id="relBody"></div>
+      <div class="chart-card" style="margin-top:12px;">
+        <div class="chart-head"><h3 id="relChartTitle">各维度 Cronbach's α</h3><button class="ghost" data-save="relChart">保存图片</button></div>
+        <div id="relChart" class="chart-box" style="height:320px;"></div>
+      </div>
     </div>
     <div class="kpis" id="kpis"></div>
     <div class="card chart-card">
@@ -835,6 +847,207 @@ function loadSheet(name){
 $('genBtn').addEventListener('click',generate);
 $('csvBtn').addEventListener('click',downloadCSV);
 $('exportReportBtn').addEventListener('click',exportReport);
+$('exportRelBtn').addEventListener('click',exportReliability);
+
+// ==================== 轻量问卷模式：自动识别李克特量表并做信度分析 ====================
+// 设计原则：零输入、自动判断。只做「能自动算准」的部分——Cronbach α / 分半信度 /
+// 逐题均值标准差 / 校正题总相关 CIT / 删除该题后的 α。不做需要人工指定维度归属或
+// 矩阵分解的 KMO / Bartlett / EFA（那部分放在 Python 脚本里，结果更可靠）。
+//
+// 识别策略（按强到弱的信号，避免把单/多选题误当量表）：
+//   1) 列名形如「两字母+序号 + 空格 + 题干」，如 CA1 我了解…、DS3 我认为…；
+//      单字母 A1/A2 这类是人口学单选，取值往往不统一为 1-5，且无空格+题干结构 → 排除
+//   2) 取值去重后恰好落在 {1..5}（或 1..7 / 0..10 的连续小整数），且以中间值附近为主
+//   3) 同一前缀至少 2 题（单点题不构成量表）
+//   4) 排除 0/1 多选题子项（形如 A7(xxx)）、排除总分/编号/时间列
+
+// 提取列名的量表编码前缀。返回 {prefix, code, stem} 或 null
+// 兼容「CA1 题干」「CA1_题干」「CA1题干」「CA1」；前缀至少 2 个字母，避免误吞 A1 单选
+function scaleCode(header){
+  const s=String(header).replace(/\s+/g,' ').trim();
+  const m=s.match(/^([A-Za-z]{2,6})\s*(\d{1,3})(?:[\s_、.．:：\-—]|$)(.*)$/);
+  if(!m) return null;
+  return {prefix:m[1].toUpperCase(), code:(m[1].toUpperCase()+m[2]), stem:(m[3]||'').trim(), full:s};
+}
+// 判断一组取值是否像李克特量表等级（连续小整数、等级数 3~11）
+function likertLevels(vals){
+  const s=new Set();
+  vals.forEach(v=>{ const n=Number(v); if(Number.isInteger(n)) s.add(n); });
+  if(s.size<3||s.size>11) return null;
+  const a=[...s].sort((x,y)=>x-y);
+  for(let i=1;i<a.length;i++) if(a[i]-a[i-1]!==1) return null;   // 必须连续
+  const lo=a[0], hi=a[a.length-1];
+  if(lo>1||hi<3||hi>10) return null;
+  // 等级必须覆盖主要档位：只出现 1 和 5、中间全空 → 不像量表
+  if(s.size < (hi-lo+1)*0.5) return null;
+  return {lo:lo, hi:hi, k:s.size};
+}
+// 自动识别量表题：返回 {items:[{col,code,prefix,stem,levels,vals,dim}], dims:[...], note}
+function detectScaleItems(rows, headers){
+  const byPrefix=new Map();
+  headers.forEach(h=>{
+    const code=scaleCode(h);
+    if(!code) return;
+    // 题干存在但太短（<4 字）也可接受；只要不是 0/1 多选题子项
+    if(/^\d+$/.test(code.stem)&&!code.stem) return;
+    const vals=rows.map(r=>Number(r[h])).filter(v=>Number.isFinite(v));
+    if(vals.length<rows.length*0.8) return;                    // 缺失太多不当量表
+    const lv=likertLevels(vals);
+    if(!lv) return;
+    // 0/1 或只有两极 → 多半是多选题标记，排除
+    if(lv.hi<=1 || lv.k<=2) return;
+    if(!byPrefix.has(code.prefix)) byPrefix.set(code.prefix,[]);
+    byPrefix.get(code.prefix).push({col:h, code:code.code, prefix:code.prefix, stem:code.stem, levels:lv, vals:vals});
+  });
+  const items=[], dims=[];
+  byPrefix.forEach((arr,p)=>{
+    if(arr.length<2) return;                                   // 单点题不构成量表
+    arr.forEach(it=>items.push(it));
+    dims.push({dim:p, cols:arr.map(x=>x.col), codes:arr.map(x=>x.code)});
+  });
+  return {items:items, dims:dims};
+}
+function variance(a){
+  if(a.length<2) return 0;
+  const m=a.reduce((s,x)=>s+x,0)/a.length;
+  return a.reduce((s,x)=>s+(x-m)*(x-m),0)/(a.length-1);       // 样本方差（ddof=1，与 Python 一致）
+}
+function cronbach(cols, rows){
+  const k=cols.length;
+  if(k<2) return NaN;
+  // 用成对完整行：任一题缺失就跳过该行（与 pandas 成对删除近似）
+  const totals=[], perCol=cols.map(()=>[]);
+  for(let i=0;i<rows.length;i++){
+    const vs=cols.map(c=>Number(rows[i][c]));
+    if(vs.some(v=>!Number.isFinite(v))) continue;
+    vs.forEach((v,j)=>perCol[j].push(v));
+    totals.push(vs.reduce((s,x)=>s+x,0));
+  }
+  const vt=variance(totals);
+  if(!(vt>0)) return NaN;
+  const sumV=perCol.reduce((s,a)=>s+variance(a),0);
+  return (k/(k-1))*(1-sumV/vt);
+}
+function meanOf(a){ return a.length? a.reduce((s,x)=>s+x,0)/a.length : NaN; }
+function sdOf(a){ return Math.sqrt(variance(a)); }
+
+// 完整信度分析（基于 state.clean 全样本，不受筛选与主指标异常值剔除影响）
+function analyzeReliability(rows, items, dims){
+  const cols=items.map(x=>x.col);
+  const alphaAll=cronbach(cols, rows);
+  // 分半信度：按题号末尾数字的奇偶分半 + Spearman-Brown 校正（与 Python 脚本同口径）
+  const odd=cols.filter(c=>{ const m=String(c).match(/(\d+)/); return m && Number(m[1])%2===1; });
+  const even=cols.filter(c=>{ const m=String(c).match(/(\d+)/); return m && Number(m[1])%2===0; });
+  const sumBy=g=>rows.map(r=>g.reduce((s,c)=>s+(Number(r[c])||0),0));
+  const rHalf=pearson(sumBy(odd), sumBy(even));
+  const sb=Number.isFinite(rHalf)? 2*rHalf/(1+rHalf) : NaN;
+  // 逐题：均值/标准差/CIT(校正题总相关)/删除该题后的 α
+  const per=items.map(it=>{
+    const others=cols.filter(c=>c!==it.col);
+    const totalOthers=rows.map(r=>others.reduce((s,c)=>s+(Number(r[c])||0),0));
+    const cit=pearson(it.vals, totalOthers);
+    return {code:it.code, stem:it.stem, mean:meanOf(it.vals), sd:sdOf(it.vals),
+            cit:cit, alphaDel:cronbach(others, rows)};
+  });
+  // 各维度 α
+  const byDim=dims.map(d=>({dim:d.dim, codes:d.codes, n:d.cols.length, alpha:cronbach(d.cols, rows)}));
+  return {n:rows.length, k:cols.length, alphaAll:alphaAll, odd:odd.length, even:even.length,
+          alphaOdd:cronbach(odd,rows), alphaEven:cronbach(even,rows), rHalf:rHalf, sb:sb,
+          per:per, byDim:byDim, levels:items[0].levels};
+}
+function alphaVerdict(a){
+  if(!Number.isFinite(a)) return {t:'无法计算', c:'#6b7686'};
+  if(a>=0.8) return {t:'良好', c:'#1c7a4d'};
+  if(a>=0.7) return {t:'可接受', c:'#2f6fed'};
+  if(a>=0.6) return {t:'勉强接受', c:'#b8860b'};
+  return {t:'偏低，建议修订题项', c:'#c0392b'};
+}
+
+function renderReliability(){
+  const rel=state.rel;
+  if(!rel || rel.k<2){ $('reliabCard').style.display='none'; return; }
+  const vd=alphaVerdict(rel.alphaAll);
+  $('relKpis').innerHTML=[
+    {v:rel.alphaAll.toFixed(3), l:`Cronbach's α（${rel.k} 题）· ${vd.t}`},
+    {v:(Number.isFinite(rel.sb)?rel.sb.toFixed(3):'—'), l:'分半信度（Spearman-Brown）'},
+    {v:String(rel.n), l:'参与计算的有效样本'},
+    {v:String(rel.byDim.length), l:'自动识别的维度数'}
+  ].map(k=>`<div class="kpi"><div class="v" style="color:${k.l.indexOf('α')>=0?vd.c:'var(--brand)'}">${k.v}</div><div class="l">${k.l}</div></div>`).join('');
+
+  const out=[];
+  out.push(`<div style="line-height:1.7;margin-bottom:8px;">自动识别出 <b>${rel.k}</b> 道量表题（取值 ${rel.levels.lo}~${rel.levels.hi} 的李克特等级），按列名前缀归为 <b>${rel.byDim.length}</b> 个维度。`
+    +`全量表 α=<b style="color:${vd.c}">${rel.alphaAll.toFixed(3)}</b>（${vd.t}）；分半信度 ${Number.isFinite(rel.sb)?rel.sb.toFixed(3):'—'}。`
+    +`计算基于清洗后全样本 ${rel.n} 行，不受筛选与异常值剔除影响。</div>`);
+  // 维度 α 表
+  out.push('<div style="font-weight:600;margin:10px 0 4px;">① 各维度信度</div>');
+  let h='<table><thead><tr><th>维度（前缀）</th><th>题数</th><th>题目编码</th><th>Cronbach α</th><th>评价</th></tr></thead><tbody>';
+  rel.byDim.forEach(d=>{ const dv=alphaVerdict(d.alpha);
+    h+=`<tr><td>${escHtml(d.dim)}</td><td style="text-align:center;">${d.n}</td><td>${escHtml(d.codes.join('、'))}</td>`
+      +`<td style="text-align:center;">${Number.isFinite(d.alpha)?d.alpha.toFixed(3):'—'}</td>`
+      +`<td style="color:${dv.c}">${dv.t}</td></tr>`; });
+  h+='</tbody></table>'; out.push(h);
+  // 逐题表
+  out.push('<div style="font-weight:600;margin:12px 0 4px;">② 逐题统计（均值 / 标准差 / 校正题总相关 CIT / 删除该题后的 α）</div>');
+  h='<table><thead><tr><th>题号</th><th>题干</th><th>均值</th><th>标准差</th><th>CIT</th><th>删除后 α</th><th>提示</th></tr></thead><tbody>';
+  rel.per.forEach(p=>{
+    let tip='—', col='#6b7686';
+    if(Number.isFinite(p.cit) && p.cit<0.3){ tip='CIT 偏低，考虑修订'; col='#c0392b'; }
+    else if(Number.isFinite(p.alphaDel) && p.alphaDel>rel.alphaAll+0.005){ tip='删除后 α 略升'; col='#b8860b'; }
+    else if(Number.isFinite(p.cit) && p.cit>=0.4){ tip='良好'; col='#1c7a4d'; }
+    h+=`<tr><td>${escHtml(p.code)}</td><td style="max-width:360px;">${escHtml(p.stem||'（无题干）')}</td>`
+      +`<td style="text-align:center;">${p.mean.toFixed(2)}</td><td style="text-align:center;">${p.sd.toFixed(2)}</td>`
+      +`<td style="text-align:center;">${Number.isFinite(p.cit)?p.cit.toFixed(3):'—'}</td>`
+      +`<td style="text-align:center;">${Number.isFinite(p.alphaDel)?p.alphaDel.toFixed(3):'—'}</td>`
+      +`<td style="color:${col}">${tip}</td></tr>`;
+  });
+  h+='</tbody></table>'; out.push(h);
+  out.push('<div class="hint">说明：CIT=该题与其余题总分的相关，一般 ≥0.3 可接受、≥0.4 良好；「删除后 α」明显高于全量表 α 说明该题在拉低一致性。本模块只做信度；KMO / Bartlett / 因子分析 / AVE-CR 请用 Python 脚本或参考已交付的信效度报告。</div>');
+  $('relBody').innerHTML=out.join('');
+  // 维度 α 条形图
+  const labels=rel.byDim.map(d=>d.dim), alphas=rel.byDim.map(d=>Number.isFinite(d.alpha)?d.alpha:0);
+  const marks=['#7c5cff','#2f6fed','#22a06b','#e0a100','#e8633a','#0ea5a5','#8b5cf6','#4f7c6a'];
+  Plotly.newPlot('relChart',[
+    {x:labels,y:alphas,type:'bar',marker:{color:labels.map((_,i)=>marks[i%marks.length])},
+     text:alphas.map(v=>v.toFixed(3)),textposition:'outside',hovertemplate:'%{x}<br>α=%{y:.3f}<extra></extra>'}
+  ],{margin:{t:16,b:60},paper_bgcolor:'#fff',plot_bgcolor:'#fff',
+     yaxis:{range:[0,1],title:"Cronbach's α",zeroline:false},
+     shapes:[{type:'line',x0:-0.5,x1:labels.length-0.5,y0:0.7,y1:0.7,line:{color:'#c0392b',dash:'dash',width:1.2}}],
+     annotations:[{x:labels.length-0.5,y:0.7,text:'0.7 可接受线',showarrow:false,xanchor:'right',yanchor:'bottom',font:{size:10,color:'#c0392b'}}]
+    },{responsive:true,displaylogo:false});
+  $('reliabCard').style.display='';
+}
+
+function exportReliability(){
+  const rel=state.rel;
+  if(!rel||rel.k<2){ showStatus('当前数据没有识别到量表题，无法导出信度报告。',true); return; }
+  const L=[];
+  L.push('问卷量表信度分析报告（自动生成于 '+new Date().toLocaleString('zh-CN')+'）');
+  L.push('数据源：'+(state.sheet||'-')+'　有效样本：'+rel.n+'　量表题数：'+rel.k);
+  L.push('');
+  L.push('一、整体信度');
+  const vd=alphaVerdict(rel.alphaAll);
+  L.push("  Cronbach's α（"+rel.k+' 题）：'+rel.alphaAll.toFixed(4)+'（'+vd.t+'）');
+  L.push('  分半信度：奇 '+rel.odd+' 题 α='+rel.alphaOdd.toFixed(4)+'；偶 '+rel.even+' 题 α='+rel.alphaEven.toFixed(4));
+  L.push('  两半相关 r='+(Number.isFinite(rel.rHalf)?rel.rHalf.toFixed(4):'—')+'；Spearman-Brown='+(Number.isFinite(rel.sb)?rel.sb.toFixed(4):'—'));
+  L.push('');
+  L.push('二、各维度信度');
+  rel.byDim.forEach(d=>L.push('  '+d.dim+'（'+d.n+' 题：'+d.codes.join('、')+'） α='+(Number.isFinite(d.alpha)?d.alpha.toFixed(4):'—')+'（'+alphaVerdict(d.alpha).t+'）'));
+  L.push('');
+  L.push('三、逐题统计');
+  L.push('  题号\t均值\t标准差\tCIT\t删除后α\t题干');
+  rel.per.forEach(p=>L.push('  '+p.code+'\t'+p.mean.toFixed(2)+'\t'+p.sd.toFixed(2)+'\t'
+    +(Number.isFinite(p.cit)?p.cit.toFixed(3):'—')+'\t'+(Number.isFinite(p.alphaDel)?p.alphaDel.toFixed(3):'—')+'\t'+(p.stem||'')));
+  L.push('');
+  L.push('说明：本模块只做信度（内部一致性）。KMO、Bartlett 球形检验、探索性因子分析、AVE/CR 需另行用统计软件计算。');
+  const blob=new Blob(['\ufeff'+L.join('\n')],{type:'text/plain;charset=utf-8'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='问卷信度报告.txt';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),3000);
+}
+
+// ---------- 生成看板 ----------
 
 function currentFilters(){
   const out=[];
@@ -967,6 +1180,11 @@ function generate(){
   rows=res.rows;
   if(!rows.length){ showStatus('清洗并筛选后没有数据，请调整筛选条件。',true); return; }
   state.filtered=rows; state.main=main;
+  // 问卷模式：信度基于清洗后全样本（不受筛选与主指标异常值剔除影响）
+  // 用原始表头检测——清洗不会改列名，但用 state.headers 最稳妥
+  const sc=detectScaleItems(state.clean, state.headers);
+  state.rel = sc.items.length>=2 ? analyzeReliability(state.clean, sc.items, sc.dims) : null;
+  renderReliability();
   state.catForGroup = state.cats.find(c=>c!==main) || null;
   state.catForDist  = state.cats[0] || null;
   // 画像基于清洗后的全量数据（不受筛选影响），异常值判据结果一并写入
