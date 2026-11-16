@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta name="build-id" content="build-2026-11-16T13-21-16-426Z">
+<meta name="build-id" content="build-2026-11-16T15-40-38-562Z">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Excel 数据看板生成器 · 免安装网页版</title>
@@ -135,6 +135,18 @@
       <div class="chart-card" style="margin-top:12px;">
         <div class="chart-head"><h3 id="relChartTitle">各维度 Cronbach's α</h3><button class="ghost" data-save="relChart">保存图片</button></div>
         <div id="relChart" class="chart-box" style="height:320px;"></div>
+      </div>
+    </div>
+    <div class="card" id="validCard" style="display:none;border-left:4px solid #2f6fed;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:0 0 10px;">
+        <h3 style="margin:0;font-size:16px;">问卷量表效度分析（自动识别，无需设置）</h3>
+        <button class="ghost" id="exportValBtn">导出效度报告</button>
+      </div>
+      <div class="kpis" id="valKpis"></div>
+      <div id="valBody"></div>
+      <div class="chart-card" style="margin-top:12px;">
+        <div class="chart-head"><h3>碎石图（特征值 &gt; 1 的因子保留）</h3><button class="ghost" data-save="screeChart">保存图片</button></div>
+        <div id="screeChart" class="chart-box" style="height:320px;"></div>
       </div>
     </div>
     <div class="kpis" id="kpis"></div>
@@ -848,6 +860,7 @@ $('genBtn').addEventListener('click',generate);
 $('csvBtn').addEventListener('click',downloadCSV);
 $('exportReportBtn').addEventListener('click',exportReport);
 $('exportRelBtn').addEventListener('click',exportReliability);
+$('exportValBtn').addEventListener('click',exportValidity);
 
 // ==================== 轻量问卷模式：自动识别李克特量表并做信度分析 ====================
 // 设计原则：零输入、自动判断。只做「能自动算准」的部分——Cronbach α / 分半信度 /
@@ -1001,7 +1014,7 @@ function renderReliability(){
       +`<td style="color:${col}">${tip}</td></tr>`;
   });
   h+='</tbody></table>'; out.push(h);
-  out.push('<div class="hint">说明：CIT=该题与其余题总分的相关，一般 ≥0.3 可接受、≥0.4 良好；「删除后 α」明显高于全量表 α 说明该题在拉低一致性。本模块只做信度；KMO / Bartlett / 因子分析 / AVE-CR 请用 Python 脚本或参考已交付的信效度报告。</div>');
+  out.push('<div class="hint">说明：CIT=该题与其余题总分的相关，一般 ≥0.3 可接受、≥0.4 良好；「删除后 α」明显高于全量表 α 说明该题在拉低一致性。效度分析（KMO / Bartlett / 因子分析 / AVE-CR）见下方「效度分析」卡片，自动完成无需设置。</div>');
   $('relBody').innerHTML=out.join('');
   // 维度 α 条形图
   const labels=rel.byDim.map(d=>d.dim), alphas=rel.byDim.map(d=>Number.isFinite(d.alpha)?d.alpha:0);
@@ -1038,11 +1051,370 @@ function exportReliability(){
   rel.per.forEach(p=>L.push('  '+p.code+'\t'+p.mean.toFixed(2)+'\t'+p.sd.toFixed(2)+'\t'
     +(Number.isFinite(p.cit)?p.cit.toFixed(3):'—')+'\t'+(Number.isFinite(p.alphaDel)?p.alphaDel.toFixed(3):'—')+'\t'+(p.stem||'')));
   L.push('');
-  L.push('说明：本模块只做信度（内部一致性）。KMO、Bartlett 球形检验、探索性因子分析、AVE/CR 需另行用统计软件计算。');
+  L.push('说明：本模块只做信度（内部一致性）。KMO、Bartlett 球形检验、探索性因子分析、AVE/CR 见「问卷效度分析报告」，同样在浏览器本地自动完成。');
   const blob=new Blob(['\ufeff'+L.join('\n')],{type:'text/plain;charset=utf-8'});
   const a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
   a.download='问卷信度报告.txt';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),3000);
+}
+
+// ==================== 效度分析：KMO / Bartlett / 探索性因子 / AVE-CR（纯 JS 实现） ====================
+// —— 线性代数基础工具 ——
+function mTrans(A){ return A[0].map((_,j)=>A.map(r=>r[j])); }
+function mMul(A,B){
+  const n=A.length,m=B[0].length,k=B.length;
+  const C=Array.from({length:n},()=>new Array(m).fill(0));
+  for(let i=0;i<n;i++) for(let t=0;t<k;t++){ const a=A[i][t]; if(!a) continue; for(let j=0;j<m;j++) C[i][j]+=a*B[t][j]; }
+  return C;
+}
+function mIdent(n){ return Array.from({length:n},(_,i)=>Array.from({length:n},(_,j)=>i===j?1:0)); }
+// 高斯-约当求逆（带主元）；奇异返回 null
+function mInv(Ain){
+  const n=Ain.length;
+  const M=Ain.map((r,i)=>r.slice().concat(mIdent(n)[i]));
+  for(let c=0;c<n;c++){
+    let piv=c; for(let r=c+1;r<n;r++) if(Math.abs(M[r][c])>Math.abs(M[piv][c])) piv=r;
+    if(Math.abs(M[piv][c])<1e-12) return null;
+    if(piv!==c){ const t=M[piv]; M[piv]=M[c]; M[c]=t; }
+    const d=M[c][c];
+    for(let j=0;j<2*n;j++) M[c][j]/=d;
+    for(let r=0;r<n;r++){ if(r===c) continue; const f=M[r][c]; if(!f) continue;
+      for(let j=0;j<2*n;j++) M[r][j]-=f*M[c][j]; }
+  }
+  return M.map(r=>r.slice(n));
+}
+// 对称正定矩阵的行列式对数（Cholesky），用于 Bartlett
+function mLogDet(Ain){
+  const n=Ain.length, L=Array.from({length:n},()=>new Array(n).fill(0));
+  for(let i=0;i<n;i++){
+    for(let j=0;j<=i;j++){
+      let s=0; for(let k=0;k<j;k++) s+=L[i][k]*L[j][k];
+      const d=Ain[i][i]-s;
+      if(i===j){ if(d<=0) return NaN; L[i][j]=Math.sqrt(d); }
+      else L[i][j]=(Ain[i][j]-s)/L[j][j];
+    }
+  }
+  let ld=0; for(let i=0;i<n;i++) ld+=2*Math.log(L[i][i]);
+  return ld;
+}
+// Lanczos log Γ(z)
+function logGamma(z){
+  const g=7, cof=[0.99999999999980993,676.5203681218851,-1259.1392167224028,
+    771.32342877765313,-176.61502916214059,12.507343278686905,
+    -0.13857109526572012,9.9843695780195716e-6,1.5056327351493116e-7];
+  if(z<0.5) return Math.log(Math.PI)-Math.log(Math.sin(Math.PI*z))-logGamma(1-z);
+  z-=1; let x=cof[0];
+  for(let i=1;i<g+2;i++) x+=cof[i]/(z+i);
+  const t=z+g+0.5;
+  return 0.5*Math.log(2*Math.PI)+(z+0.5)*Math.log(t)-t+Math.log(x);
+}
+// 卡方分布上尾 P(X>x)：正则化上不完全 Γ 函数 Q(a,x)，a=df/2, x=val/2
+function chi2Sf(val,df){
+  if(!(val>0)||!(df>0)) return NaN;
+  const a=df/2, x=val/2;
+  if(x<=0) return 1;
+  const EPS=1e-14, FPMIN=1e-300;
+  if(x<a+1){
+    let sum=1/a, del=sum, ap=a;
+    for(let n=0;n<500;n++){ ap++; del*=x/ap; sum+=del; if(Math.abs(del)<Math.abs(sum)*EPS) break; }
+    const P=sum*Math.exp(-x+a*Math.log(x)-logGamma(a));
+    return Math.max(0,1-P);
+  }
+  let b=x+1-a, c=1/FPMIN, d=1/b, h=d;
+  for(let i=1;i<=500;i++){
+    const an=-i*(i-a); b+=2;
+    d=an*d+b; if(Math.abs(d)<FPMIN) d=FPMIN;
+    c=b+an/c; if(Math.abs(c)<FPMIN) c=FPMIN;
+    d=1/d; const del=d*c; h*=del;
+    if(Math.abs(del-1)<EPS) break;
+  }
+  return Math.max(0,Math.min(1,Math.exp(-x+a*Math.log(x)-logGamma(a))*h));
+}
+// 对称矩阵 Jacobi 特征分解：返回按特征值降序的 {values, vectors(列向量)}
+function mJacobi(Ain,maxIter=200){
+  const n=Ain.length, A=Ain.map(r=>r.slice()), V=mIdent(n);
+  for(let iter=0;iter<maxIter;iter++){
+    let p=0,q=1,mx=0;
+    for(let i=0;i<n;i++) for(let j=i+1;j<n;j++){ const v=Math.abs(A[i][j]); if(v>mx){ mx=v; p=i; q=j; } }
+    if(mx<1e-12) break;
+    const theta=(A[q][q]-A[p][p])/(2*A[p][q]);
+    const t=(theta>=0?1:-1)/(Math.abs(theta)+Math.sqrt(1+theta*theta));
+    const c=1/Math.sqrt(t*t+1), s=t*c, tau=s/(1+c);
+    const h=t*A[p][q];
+    A[p][p]-=h; A[q][q]+=h; A[p][q]=A[q][p]=0;
+    for(let k=0;k<n;k++){
+      if(k!==p&&k!==q){ const akp=A[k][p],akq=A[k][q];
+        A[k][p]=A[p][k]=c*akp-s*akq; A[k][q]=A[q][k]=s*akp+c*akq; }
+      const vkp=V[k][p],vkq=V[k][q];
+      V[k][p]=c*vkp-s*vkq; V[k][q]=s*vkp+c*vkq;
+    }
+  }
+  const ord=Array.from({length:n},(_,i)=>i).sort((a,b)=>A[b][b]-A[a][a]);
+  return {values:ord.map(i=>A[i][i]), vectors:ord.map(i=>V.map(r=>r[i]))};
+}
+// 用幂迭代+收缩求方阵 SVD：返回 U,S,V（A=U·diag(S)·Vᵀ）。这里只用于 varimax 里的小矩阵(k≤16)
+function mSVD(Ain){
+  const m=Ain.length, n=Ain[0].length;
+  const ATA=mMul(mTrans(Ain),Ain);
+  const e=mJacobi(ATA);
+  // e.vectors[j] 是第 j 个特征向量(数组)；转成矩阵 Vmat[i][j] = 第 j 个右奇异向量的第 i 分量
+  const V=Array.from({length:m},(_,i)=>Array.from({length:n},(_,j)=>e.vectors[j][i]));
+  const S=e.values.map(v=>Math.sqrt(Math.max(0,v)));
+  const U=Array.from({length:m},()=>new Array(n).fill(0));
+  for(let j=0;j<n;j++){
+    if(S[j]<1e-12) continue;
+    for(let i=0;i<m;i++){ let s=0; for(let k=0;k<n;k++) s+=Ain[i][k]*V[k][j]; U[i][j]=s/S[j]; }
+  }
+  return {U:U,S:S,V:V};
+}
+// Kaiser varimax 正交旋转（与 Python 同口径：SVD 迭代）
+function mVarimax(Lin,gamma=1,it=500,tol=1e-6){
+  const n=Lin.length,k=Lin[0].length;
+  let Rot=mIdent(k), d=0;
+  for(let step=0;step<it;step++){
+    const dOld=d;
+    const Lambda=mMul(Lin,Rot);               // n×k
+    const ss=Array.from({length:k},()=>0);     // 每列的平方和 = diag(LambdaᵀLambda)
+    for(let r=0;r<n;r++) for(let j=0;j<k;j++) ss[j]+=Lambda[r][j]*Lambda[r][j];
+    // T = Lambda^3 - (gamma/k)*Lambda*diag(ss)
+    const T=Lambda.map(row=>row.map((v,j)=> v*v*v - (gamma/k)*v*ss[j]));
+    const M=mMul(mTrans(Lin),T);              // k×k
+    const svd=mSVD(M);
+    Rot=mMul(svd.U,mTrans(svd.V));
+    d=svd.S.reduce((a,b)=>a+b,0);
+    if(dOld!==0 && d/dOld<1+tol) break;
+  }
+  return mMul(Lin,Rot);
+}
+// 由 16 题数据算出完整效度结果；items 顺序即题目顺序
+function analyzeValidity(rows,items,dims){
+  const cols=items.map(x=>x.col), p=cols.length;
+  if(p<3) return null;
+  const series=cols.map(c=>rows.map(r=>Number(r[c])));
+  // 相关矩阵（成对完整）
+  const R=Array.from({length:p},()=>new Array(p).fill(1));
+  for(let i=0;i<p;i++) for(let j=i+1;j<p;j++){ const r=pearson(series[i],series[j]); R[i][j]=R[j][i]=r; }
+  // KMO
+  const Rinv=mInv(R);
+  let r2sum=0,u2sum=0;
+  for(let i=0;i<p;i++) for(let j=0;j<p;j++) if(i!==j) r2sum+=R[i][j]*R[i][j];
+  if(Rinv){
+    for(let i=0;i<p;i++) for(let j=0;j<p;j++) if(i!==j){
+      const den=Math.sqrt(Rinv[i][i]*Rinv[j][j]);
+      const partial=den>0? -Rinv[i][j]/den : 0;
+      u2sum+=partial*partial;
+    }
+  }
+  const kmo=(r2sum+u2sum)>0? r2sum/(r2sum+u2sum) : NaN;
+  // Bartlett
+  const logdet=mLogDet(R), df=p*(p-1)/2;
+  const chi2v=Number.isFinite(logdet)? -(rows.length-1-(2*p+5)/6)*logdet : NaN;
+  const pval=chi2Sf(chi2v,df);
+  // 主成分提取 + varimax
+  const ej=mJacobi(R);
+  const eigAll=ej.values;
+  const ncomp=eigAll.filter(v=>v>1).length;
+  const nc=Math.max(1,ncomp);
+  // 载荷 = 特征向量 * sqrt(特征值)
+  const loads=Array.from({length:p},(_,i)=>Array.from({length:nc},(_,j)=>ej.vectors[j][i]*Math.sqrt(Math.max(0,eigAll[j]))));
+  let Lr=ncomp>=2? mVarimax(loads): loads.map(r=>r.slice());
+  // 按因子可解释方差排序
+  const ss=Array.from({length:nc},(_,j)=>Lr.reduce((s,r)=>s+r[j]*r[j],0));
+  const ord=Array.from({length:nc},(_,j)=>j).sort((a,b)=>ss[b]-ss[a]);
+  Lr=Lr.map(r=>ord.map(j=>r[j]));
+  const eigUsed=ord.map(j=>eigAll[j]);
+  // 统一每个因子的符号：让载荷和为正，便于阅读
+  for(let j=0;j<nc;j++){
+    let sum=Lr.reduce((s,r)=>s+r[j],0);
+    if(sum<0) for(let i=0;i<p;i++) Lr[i][j]=-Lr[i][j];
+  }
+  const loadings=items.map((it,i)=>({code:it.code,stem:it.stem,f:Lr[i].slice()}));
+  const varExpl=eigUsed.map(v=>v/p*100);
+  const cumVar=eigUsed.reduce((a,b)=>a+b,0)/p*100;
+  // 单因子（未旋转）载荷，供对照
+  const efa1=items.map((it,i)=>({code:it.code,load:Math.abs(loads[i][0])}));
+  // 各维度 AVE / CR（载荷用「题—其余题之和」相关，经验下限 0.35，与 Python 同口径）
+  const ve={};
+  dims.forEach(d=>{
+    const idx=d.cols.map(c=>cols.indexOf(c));
+    const lams=idx.map(ii=>{
+      const restSeries=idx.filter(j=>j!==ii).map(j=>series[j]);
+      const restSum=rows.map((_,r)=>restSeries.reduce((s,arr)=>s+(Number.isFinite(arr[r])?arr[r]:0),0));
+      const lam=pearson(series[ii],restSum);
+      return Math.max(0.35,Number.isFinite(lam)?lam:0.35);
+    });
+    const sl=lams.reduce((a,b)=>a+b,0);
+    const cr=sl*sl/(sl*sl+lams.reduce((s,l)=>s+(1-l*l),0));
+    const ave=lams.reduce((s,l)=>s+l*l,0)/lams.length;
+    ve[d.dim]={cr:cr,ave:ave,sqrt_ave:Math.sqrt(ave)};
+  });
+  // 维度相关矩阵
+  const dimNames=dims.map(d=>d.dim);
+  const dimScore={};
+  dims.forEach(d=>{ const idx=d.cols.map(c=>cols.indexOf(c));
+    dimScore[d.dim]=rows.map((_,r)=>{ let s=0,cnt=0; idx.forEach(i=>{ if(Number.isFinite(series[i][r])){ s+=series[i][r]; cnt++; } }); return cnt? s/cnt:NaN; }); });
+  const dimCorr={};
+  dimNames.forEach(a=>{ dimCorr[a]={}; dimNames.forEach(b=>{ dimCorr[a][b]=pearson(dimScore[a],dimScore[b]); }); });
+  return {n:rows.length,p:p,kmo:kmo,chi2:chi2v,df:df,pval:pval,
+    eigenAll:eigAll,nFactor:ncomp,eigUsed:eigUsed,varExpl:varExpl,cumVar:cumVar,
+    loadings:loadings,efa1:efa1,ve:ve,dimNames:dimNames,dimCorr:dimCorr};
+}
+function kmoVerdict(k){
+  if(!Number.isFinite(k)) return {t:'无法计算',c:'#6b7686'};
+  if(k>=0.9) return {t:'极好',c:'#1c7a4d'};
+  if(k>=0.8) return {t:'良好',c:'#1c7a4d'};
+  if(k>=0.7) return {t:'可接受',c:'#2f6fed'};
+  if(k>=0.6) return {t:'勉强',c:'#b8860b'};
+  return {t:'不佳',c:'#c0392b'};
+}
+
+function renderValidity(){
+  const v=state.val;
+  if(!v || !Number.isFinite(v.kmo)){ $('validCard').style.display='none'; return; }
+  const kv=kmoVerdict(v.kmo);
+  const bartSig=Number.isFinite(v.pval)&&v.pval<0.05;
+  $('valKpis').innerHTML=[
+    {v:v.kmo.toFixed(3), l:`KMO 采样适切性 · ${kv.t}`},
+    {v:'χ²='+v.chi2.toFixed(1), l:`Bartlett 球形检验（df=${v.df}）· ${bartSig?'显著':'不显著'}`},
+    {v:String(v.nFactor), l:'特征值>1 的因子数'},
+    {v:v.cumVar.toFixed(1)+'%', l:'累积方差解释率'}
+  ].map(k=>`<div class="kpi"><div class="v" style="color:${k.l.indexOf('KMO')>=0?kv.c:'var(--brand)'}">${k.v}</div><div class="l">${k.l}</div></div>`).join('');
+
+  const pv=Number.isFinite(v.pval)?(v.pval<0.001?'p<0.001':'p='+v.pval.toFixed(4)):'p=—';
+  const out=[];
+  out.push(`<div style="line-height:1.7;margin-bottom:8px;">基于 <b>${v.p}</b> 道量表题、<b>${v.n}</b> 份有效样本。`
+    +`KMO=<b style="color:${kv.c}">${v.kmo.toFixed(3)}</b>（${kv.t}），Bartlett χ²(${v.df})=<b>${v.chi2.toFixed(1)}</b>，${pv}——`
+    +(bartSig?'两项均支持继续做因子分析。':'Bartlett 未达显著，因子分析需谨慎。')+`</div>`);
+
+  // ① 特征值与方差解释
+  out.push('<div style="font-weight:600;margin:10px 0 4px;">① 特征值 & 方差解释（主成分提取）</div>');
+  let h='<table><thead><tr><th>成分</th><th>特征值</th><th>方差解释率</th><th>累积解释率</th></tr></thead><tbody>';
+  let cum=0;
+  v.eigenAll.forEach((ev,i)=>{ cum+=ev/v.p*100;
+    const used=i<v.nFactor;
+    h+=`<tr${used?' style="background:#f0edff;"':''}><td>${i+1}${used?' ✓保留':''}</td>`
+      +`<td style="text-align:center;">${ev.toFixed(3)}</td><td style="text-align:center;">${(ev/v.p*100).toFixed(1)}%</td>`
+      +`<td style="text-align:center;">${cum.toFixed(1)}%</td></tr>`; });
+  h+='</tbody></table>'; out.push(h);
+
+  // ② 旋转后因子载荷
+  out.push(`<div style="font-weight:600;margin:12px 0 4px;">② 旋转后的因子载荷矩阵（Varimax，|载荷|≥0.4 标 *）</div>`);
+  const nf=v.eigUsed.length;
+  h='<table><thead><tr><th>题号</th><th>题干</th>';
+  for(let j=0;j<nf;j++) h+=`<th style="text-align:center;">因子 ${j+1}</th>`;
+  h+='<th style="text-align:center;">共同度</th></tr></thead><tbody>';
+  v.loadings.forEach(row=>{
+    let comm=0; row.f.forEach(x=>comm+=x*x);
+    h+=`<tr><td>${escHtml(row.code)}</td><td style="max-width:300px;">${escHtml(row.stem||'（无题干）')}</td>`;
+    row.f.forEach(x=>{ const hi=Math.abs(x)>=0.4;
+      h+=`<td style="text-align:center;${hi?'font-weight:700;color:#2f6fed;':''}">${x.toFixed(3)}${hi?'*':''}</td>`; });
+    h+=`<td style="text-align:center;">${comm.toFixed(3)}</td></tr>`;
+  });
+  h+='</tbody></table>'; out.push(h);
+
+  // ③ 收敛效度 AVE / CR
+  out.push('<div style="font-weight:600;margin:12px 0 4px;">③ 收敛效度：AVE / CR</div>');
+  h='<table><thead><tr><th>维度</th><th>题数</th><th>AVE</th><th>CR</th><th>√AVE</th><th>判断</th></tr></thead><tbody>';
+  v.dimNames.forEach(d=>{
+    const ve=v.ve[d], ncol=(state.rel&&state.rel.byDim.find(x=>x.dim===d))?state.rel.byDim.find(x=>x.dim===d).n:'—';
+    const ok=ve.ave>=0.5&&ve.cr>=0.7;
+    h+=`<tr><td>${escHtml(d)}</td><td style="text-align:center;">${ncol}</td>`
+      +`<td style="text-align:center;">${ve.ave.toFixed(3)}</td><td style="text-align:center;">${ve.cr.toFixed(3)}</td>`
+      +`<td style="text-align:center;">${ve.sqrt_ave.toFixed(3)}</td>`
+      +`<td style="color:${ok?'#1c7a4d':'#b8860b'}">${ok?'达标':'未达标准'}</td></tr>`;
+  });
+  h+='</tbody></table>';
+  out.push(h+'<div class="hint">参考标准：AVE≥0.5、CR≥0.7 为理想；本工具载荷用「题—其余题相关」近似，正式量表建议用 AMOS / Mplus 做验证性因子分析确认。</div>');
+
+  // ④ 区分效度 Fornell-Larcker
+  out.push('<div style="font-weight:600;margin:12px 0 4px;">④ 区分效度：Fornell-Larcker 准则</div>');
+  h='<table><thead><tr><th>维度</th>';
+  v.dimNames.forEach(d=>h+=`<th style="text-align:center;">${escHtml(d)}</th>`);
+  h+='</tr></thead><tbody>';
+  v.dimNames.forEach(a=>{
+    h+=`<tr><td>${escHtml(a)}</td>`;
+    v.dimNames.forEach(b=>{
+      if(a===b){ h+=`<td style="text-align:center;background:#f5f5f5;font-weight:600;">${v.ve[a].sqrt_ave.toFixed(3)}</td>`; }
+      else { const r=v.dimCorr[a][b]; h+=`<td style="text-align:center;">${r.toFixed(3)}</td>`; }
+    });
+    h+='</tr>';
+  });
+  h+='</tbody></table>';
+  // 自动判定
+  let viol=0,total=0;
+  v.dimNames.forEach((a,ai)=>v.dimNames.forEach((b,bi)=>{ if(ai<bi){ total++; if(v.dimCorr[a][b]>Math.min(v.ve[a].sqrt_ave,v.ve[b].sqrt_ave)) viol++; } }));
+  out.push(h+`<div class="hint">对角线（灰底）为 √AVE，非对角线为维度间相关。${total} 对维度中有 <b style="color:${viol?'#c0392b':'#1c7a4d'}">${viol}</b> 对的相关高于 √AVE${viol?'（区分效度不足，维度之间重叠较多）':'（区分效度达标）'}。</div>`);
+
+  // ⑤ 自动解读
+  const firstPct=v.varExpl.length?v.varExpl[0]:0;
+  const domFactor=firstPct>=40;
+  out.push('<div style="font-weight:600;margin:12px 0 4px;">⑤ 综合解读</div>');
+  const msgs=[];
+  msgs.push(`因子分析共提取 <b>${v.nFactor}</b> 个特征值>1 的因子，累积解释 <b>${v.cumVar.toFixed(1)}%</b> 的方差。`);
+  if(domFactor) msgs.push(`第一因子独占 <b>${firstPct.toFixed(1)}%</b>，呈明显的「单一总体因子」结构——各题更像在测同一个整体态度，而不是彼此独立的维度。`);
+  const dimN=v.dimNames.length;
+  if(v.nFactor<dimN) msgs.push(`因子数（${v.nFactor}）少于设计的维度数（${dimN}），预设的维度结构未得到数据支持。`);
+  const weak=v.dimNames.filter(d=>v.ve[d].ave<0.5);
+  if(weak.length) msgs.push(`有 ${weak.length} 个维度 AVE<0.5（${weak.map(escHtml).join('、')}），收敛效度偏弱。`);
+  if(viol>0) msgs.push(`${viol} 对维度相关高于 √AVE，区分效度不足。`);
+  msgs.push('<b>建议：</b>本次可将量表作为「总体态度指数」（算总分/均分）使用；不建议把各维度当独立变量做回归、中介等推断分析。若作业要求维度分析，请在报告中如实说明上述限制。');
+  out.push(`<div style="line-height:1.8;background:#faf9ff;border:1px solid #e8e4ff;border-radius:8px;padding:10px 14px;">${msgs.map(m=>'• '+m).join('<br>')}</div>`);
+
+  out.push('<div class="hint">说明：本模块在浏览器本地完成全部矩阵运算（KMO、Bartlett、Jacobi 特征分解、Varimax 旋转、AVE/CR），结果与 Python 脚本同口径。p 值由卡方分布的正则化不完全 Γ 函数计算。效度结论仅供教学参考。</div>');
+  $('valBody').innerHTML=out.join('');
+
+  // 碎石图
+  const xs=v.eigenAll.map((_,i)=>'成分 '+(i+1));
+  Plotly.newPlot('screeChart',[
+    {x:xs,y:v.eigenAll,type:'bar',marker:{color:v.eigenAll.map(ev=>ev>1?'#2f6fed':'#c9c5e8')},
+     text:v.eigenAll.map(ev=>ev.toFixed(2)),textposition:'outside',hovertemplate:'%{x}<br>特征值=%{y:.3f}<extra></extra>',name:'特征值'},
+    {x:xs,y:v.eigenAll,type:'scatter',mode:'lines+markers',line:{color:'#7c5cff',width:2},marker:{size:6},name:'碎石线',hoverinfo:'skip'}
+  ],{margin:{t:16,b:70},paper_bgcolor:'#fff',plot_bgcolor:'#fff',showlegend:false,
+     yaxis:{title:'特征值',zeroline:false},
+     shapes:[{type:'line',x0:-0.5,x1:xs.length-0.5,y0:1,y1:1,line:{color:'#c0392b',dash:'dash',width:1.2}}],
+     annotations:[{x:xs.length-0.5,y:1,text:'特征值=1',showarrow:false,xanchor:'right',yanchor:'bottom',font:{size:10,color:'#c0392b'}}]
+    },{responsive:true,displaylogo:false});
+  $('validCard').style.display='';
+}
+
+function exportValidity(){
+  const v=state.val;
+  if(!v||!Number.isFinite(v.kmo)){ showStatus('当前数据没有识别到量表题，无法导出效度报告。',true); return; }
+  const L=[];
+  L.push('问卷量表效度分析报告（自动生成于 '+new Date().toLocaleString('zh-CN')+'）');
+  L.push('数据源：'+(state.sheet||'-')+'　有效样本：'+v.n+'　量表题数：'+v.p);
+  L.push('');
+  L.push('一、KMO 与 Bartlett 检验');
+  L.push('  KMO='+v.kmo.toFixed(4)+'（'+kmoVerdict(v.kmo).t+'）');
+  L.push('  Bartlett χ²('+v.df+')='+v.chi2.toFixed(2)+'，p='+(Number.isFinite(v.pval)?v.pval.toExponential(3):'—'));
+  L.push('');
+  L.push('二、特征值与方差解释');
+  let cum=0;
+  v.eigenAll.forEach((ev,i)=>{ cum+=ev/v.p*100;
+    L.push('  成分'+(i+1)+'：特征值='+ev.toFixed(3)+'，解释率='+(ev/v.p*100).toFixed(1)+'%，累积='+cum.toFixed(1)+'%'+(i<v.nFactor?'  ←保留':'')); });
+  L.push('  累积方差解释率='+v.cumVar.toFixed(1)+'%');
+  L.push('');
+  L.push('三、旋转后因子载荷（Varimax，|载荷|≥0.4 标 *）');
+  const nf=v.eigUsed.length;
+  L.push('  题号\t'+Array.from({length:nf},(_,j)=>'因子'+(j+1)).join('\t')+'\t共同度\t题干');
+  v.loadings.forEach(row=>{ let comm=0; row.f.forEach(x=>comm+=x*x);
+    L.push('  '+row.code+'\t'+row.f.map(x=>x.toFixed(3)+(Math.abs(x)>=0.4?'*':'')).join('\t')+'\t'+comm.toFixed(3)+'\t'+(row.stem||'')); });
+  L.push('');
+  L.push('四、收敛效度 AVE / CR');
+  L.push('  维度\tAVE\tCR\t√AVE');
+  v.dimNames.forEach(d=>{ const ve=v.ve[d]; L.push('  '+d+'\t'+ve.ave.toFixed(3)+'\t'+ve.cr.toFixed(3)+'\t'+ve.sqrt_ave.toFixed(3)); });
+  L.push('');
+  L.push('五、区分效度（Fornell-Larcker：下三角为维度相关，对角线为 √AVE）');
+  L.push('  \t'+v.dimNames.join('\t'));
+  v.dimNames.forEach(a=>{ L.push('  '+a+'\t'+v.dimNames.map(b=>a===b?v.ve[a].sqrt_ave.toFixed(3):v.dimCorr[a][b].toFixed(3)).join('\t')); });
+  L.push('');
+  L.push('说明：全部矩阵运算在浏览器本地完成。AVE/CR 载荷为「题—其余题相关」近似，正式量表建议用验证性因子分析确认。');
+  const blob=new Blob(['\ufeff'+L.join('\n')],{type:'text/plain;charset=utf-8'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='问卷效度报告.txt';
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(()=>URL.revokeObjectURL(a.href),3000);
 }
@@ -1184,7 +1556,9 @@ function generate(){
   // 用原始表头检测——清洗不会改列名，但用 state.headers 最稳妥
   const sc=detectScaleItems(state.clean, state.headers);
   state.rel = sc.items.length>=2 ? analyzeReliability(state.clean, sc.items, sc.dims) : null;
+  state.val = sc.items.length>=3 ? analyzeValidity(state.clean, sc.items, sc.dims) : null;
   renderReliability();
+  renderValidity();
   state.catForGroup = state.cats.find(c=>c!==main) || null;
   state.catForDist  = state.cats[0] || null;
   // 画像基于清洗后的全量数据（不受筛选影响），异常值判据结果一并写入
